@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">本地更新</string>
+    <string name="module_description">放开荣耀 MagicOS 本地更新开关（msc.update.type / local_ota_for_developer）</string>
+</resources>
