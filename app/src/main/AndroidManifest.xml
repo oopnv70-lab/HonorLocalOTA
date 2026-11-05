@@ -2,37 +2,25 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 不声明任何存储权限：目录枚举与搬运全部通过 su 执行 ls/cp/chcon。
-         拿到 root 之后申请 all-files 权限是多余的，也会让用户以为还要去
-         系统设置里单独开「所有文件访问权限」。 -->
+    <!--
+      这个模块不声明任何 Activity，也不声明任何权限。
+
+      原因：界面是直接盖在 com.hihonor.ouc 的 MainEntranceActivity 上的一层 View，
+      运行在 OUC 进程里（由 LSPosed 加载），不是独立组件。所以：
+        · 没有桌面图标，没有可启动组件；
+        · 不需要 exported、不需要跨进程 Intent；
+        · 写 /data/local_ota 靠 OUC 自身的 platform_app 域权限，不需要 root；
+        · 选文件走系统 SAF，不需要存储权限。
+
+      装完之后只要在 LSPosed 里勾选并重启「软件更新」，三点菜单里就会出现原版的
+      「本地更新」项（判定条件见 kh.l.C()），点它进我们的面板。
+    -->
 
     <application
         android:label="@string/app_name"
         android:description="@string/module_description"
         android:hasCode="true"
-        tools:ignore="MissingApplicationIcon,AllowBackup">
-
-        <!-- 入口：开关 + 强制重启「软件更新」 -->
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:label="@string/app_name">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-
-        <!-- 第二个界面：从「软件更新」三点菜单点进来。
-             必须 exported=true 且不加权限：它由 OUC 进程里的 hook
-             跨应用拉起，而 OUC 与我们是两个 uid，不加就会
-             Permission Denial。 -->
-        <activity
-            android:name=".OtaActivity"
-            android:exported="true"
-            android:label="@string/app_name"
-            android:excludeFromRecents="false" />
-
-    </application>
+        android:allowBackup="false"
+        tools:ignore="MissingApplicationIcon,AllowBackup" />
 
 </manifest>

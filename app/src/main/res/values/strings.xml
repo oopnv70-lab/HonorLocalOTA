@@ -1,10 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 名字必须与荣耀「软件更新」区分开：原来的"本地更新"正好等于原版菜单文案
-         (com.hihonor.ouc 的 0x7f110299)，装在桌面同一个抽屉里必然混淆。 -->
-    <string name="app_name">系统包投放器</string>
-    <string name="module_description">给荣耀「软件更新」的三点菜单加一项，用于把 Download/OTA 里的安装包搬进原版可识别目录。</string>
-
-    <!-- 三点菜单注入项的名字。刻意与原版「本地更新」不同。 -->
-    <string name="menu_title">系统包投放…</string>
+    <!-- 模块名只出现在 LSPosed 列表里，不生成桌面图标，所以不存在和原版
+         「本地更新」混淆的问题。 -->
+    <string name="app_name">系统包投放</string>
+    <string name="module_description">给荣耀「软件更新」三点菜单里的「本地更新」项换掉免责声明页，改为直接选包并交给原版安装流程。</string>
 </resources>
