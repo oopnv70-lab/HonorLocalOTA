@@ -2,18 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 读取 Download/OTA 里的 OTA 包。Android 11+ 分区存储下，访问
-         Download 需要 MANAGE_EXTERNAL_STORAGE（all-files）或用户选择目录。
-         本应用由用户手动授予 root，属于可信工具类，这里直接申请 all-files。 -->
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
-        tools:ignore="ScopedStorage" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <!-- 不声明任何存储权限：目录枚举与搬运全部通过 su 执行 ls/cp/chcon 完成。
+         拿到 root 之后申请 all-files 权限是多余的，也会让用户以为还要去
+         系统设置里单独开「所有文件访问权限」。 -->
 
     <application
         android:label="@string/app_name"
         android:description="@string/module_description"
         android:hasCode="true"
-        android:requestLegacyExternalStorage="true"
         tools:ignore="MissingApplicationIcon,AllowBackup">
 
         <activity
