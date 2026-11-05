@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 不声明任何存储权限：目录枚举与搬运全部通过 su 执行 ls/cp/chcon 完成。
+    <!-- 不声明任何存储权限：目录枚举与搬运全部通过 su 执行 ls/cp/chcon。
          拿到 root 之后申请 all-files 权限是多余的，也会让用户以为还要去
          系统设置里单独开「所有文件访问权限」。 -->
 
@@ -12,6 +12,7 @@
         android:hasCode="true"
         tools:ignore="MissingApplicationIcon,AllowBackup">
 
+        <!-- 入口：开关 + 强制重启「软件更新」 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -21,6 +22,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 第二个界面：从「软件更新」三点菜单点进来。
+             必须 exported=true 且不加权限：它由 OUC 进程里的 hook
+             跨应用拉起，而 OUC 与我们是两个 uid，不加就会
+             Permission Denial。 -->
+        <activity
+            android:name=".OtaActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:excludeFromRecents="false" />
 
     </application>
 

@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">本地更新</string>
-    <string name="module_description">放开荣耀 MagicOS 本地更新开关（msc.update.type / local_ota_for_developer）</string>
+    <!-- 名字必须与荣耀「软件更新」区分开：原来的"本地更新"正好等于原版菜单文案
+         (com.hihonor.ouc 的 0x7f110299)，装在桌面同一个抽屉里必然混淆。 -->
+    <string name="app_name">系统包投放器</string>
+    <string name="module_description">给荣耀「软件更新」的三点菜单加一项，用于把 Download/OTA 里的安装包搬进原版可识别目录。</string>
+
+    <!-- 三点菜单注入项的名字。刻意与原版「本地更新」不同。 -->
+    <string name="menu_title">系统包投放…</string>
 </resources>
