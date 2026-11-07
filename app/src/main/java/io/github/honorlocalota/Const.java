@@ -128,20 +128,42 @@ final class Const {
     /** su 可执行文件路径（KernelSU 在 /system/bin/su）。 */
     static final String SU_BIN = "/system/bin/su";
 
+    /**
+     * 功能一（关闭检查更新）的配置开关名。
+     *
+     * 写 block_check=1 → 压掉 l5.b.p() 算出的全部「有新版本」标志，
+     *                    UI 恒显示「已是最新版本」，服务器回了什么都看不到。
+     * 不写或写 0      → 完全放行，界面按服务器真实回包显示。
+     *
+     * 为什么要有这个开关，而不是像以前那样「有伪造配置就自动放行」：
+     *   以前是隐式互斥，用户写了任何伪造项，功能一就被悄悄关掉，
+     *   用户既不知道也无法单独验证。显式开关后，两个功能可以分别
+     *   开关，验证功能二效果时必须显式确认这里是关的。
+     */
+    static final String KEY_BLOCK_CHECK = "block_check";
+
     /** 配置文件模板内容，面板/文档里可以直接引用。 */
     static final String SPOOF_TEMPLATE =
-            "# 只写你想改的字段，没写或用 # 注释掉的保持原值。\n"
-            + "# 每次点「检查更新」都会重新读本文件，改完即生效，不用重启。\n"
-            + "# 值为空 = 不改该字段。\n"
+            "# 功能一：关闭检查更新。写 1 开启，写 0 或不写则关闭。\n"
+            + "# 开启后界面恒显示「已是最新版本」，服务器回了什么都看不到。\n"
+            + "# 验证版本伪造效果时，这里必须是 0 或不写。\n"
+            + "# block_check=1\n"
             + "\n"
-            + "# 系统基带版本串，服务器靠这个判断你停在哪个大版本\n"
-            + "# productBaseVersion=AAK-LGRP1-CHN 10.0.0.150(SP2)\n"
+            + "# 功能二：伪造版本。下面按系统属性全名填写，等号后面是假值。\n"
+            + "# 只写想改的项，没写或用 # 注释掉的保持机器真实值。\n"
+            + "# 每次检查更新都会重新读本文件，改完即生效，不用重启。\n"
+            + "\n"
+            + "# 系统版本串，服务器靠这个判断你停在哪个大版本\n"
+            + "# ro.comp.hl.product_base_version=AAK-LGRP1-CHN 10.0.0.127(SP7)\n"
             + "\n"
             + "# 定制版本串\n"
-            + "# cVersion=AAK-AN00-CUST 10.0.0.150(C00)\n"
+            + "# ro.comp.hl.product_cust_version=AAK-AN00-CUST 10.0.0.127(C00)\n"
             + "\n"
-            + "# 其余可改字段：dVersion / deviceDisplayVersion / hotaVersion\n"
-            + "# vabGroupVersion / verGroup / vendorCota\n";
+            + "# 界面显示的完整版本串（同时改 Build.DISPLAY）\n"
+            + "# ro.build.display.id=AAK-AN00 10.0.0.127(C00E126R102P7)\n"
+            + "\n"
+            + "# 预置应用版本串\n"
+            + "# ro.comp.hl.product_preload_version=AAK-AN00-PRELOAD 10.0.0.2(C00R102)\n";
 
     private Const() {
     }

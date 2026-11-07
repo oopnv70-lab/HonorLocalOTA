@@ -226,16 +226,26 @@ public class OtaHook extends XposedModule {
             hook(sum).intercept(chain -> {
                 Object r = chain.proceed();   // 先让原版把各标志算完
 
-                // ── 关键：两个功能互斥 ──
-                // 压掉「有新版本」标志 = 客户端判定无新版本 = 根本不构造请求体、
-                // 不发网络请求，于是 ParamBuilder.<init> 永不执行，
-                // 版本伪造整套逻辑（含 readSpoofConfig）都走不到。
+                // ── 开关：block_check ──
+                // 配置里写 block_check=1 → 压掉「有新版本」标志（功能一生效）
+                // 不写或写 0            → 完全放行，标志保持服务器的原判
                 //
-                // 所以这里先看有没有伪造配置：
-                //   有配置 → 放行，让请求真发出去，版本由 hookSpoofVersion 改
-                //   没配置 → 保持原有行为，恒为「无新版本」
-                // 每次调用都重读，改完配置立刻切换行为，不用重装。
-                if (!readSpoofConfig().isEmpty()) {
+                // 之前这里是「配置非空就放行」的隐式互斥，问题在于
+                // 只要写了任何伪造项，功能一就被悄悄关掉，用户无从得知。
+                // 现在改成显式开关，两个功能各自独立可控：
+                //
+                //   只想关检查更新：block_check=1，不写任何版本项
+                //   只想伪造版本：  写版本项，不写 block_check（或写 0）
+                //   两个都要：      两者都写（会互相抵消，见下方说明）
+                //
+                // 注意：同时开启会互相抵消。压掉标志后 UI 恒显示
+                // 「已是最新版本」，无论服务器回了什么，等于把功能二
+                // 的效果完全遮住。验证功能二时必须关掉这里。
+                java.util.Map<String, String> cfg = readSpoofConfig();
+                String sw = cfg.get(KEY_BLOCK_CHECK);
+                boolean block = "1".equals(sw) || "true".equalsIgnoreCase(sw);
+                if (!block) {
+                    log(Log.INFO, TAG, "block_check 未开启，功能一放行（标志保持原判）");
                     return r;
                 }
 
@@ -244,13 +254,16 @@ public class OtaHook extends XposedModule {
                     for (Field f : fields) {
                         f.setBoolean(self, false);
                     }
+                    log(Log.INFO, TAG, "block_check 已开启，已压掉 " + fields.length
+                            + " 个新版本标志");
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "清理新版本标志失败: " + t);
                 }
                 return r;
             });
 
-            log(Log.INFO, TAG, "已挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM + "()，检查更新将恒为无新版本");
+            log(Log.INFO, TAG, "已挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM
+                    + "()，由配置 block_check 控制是否恒为无新版本");
             return true;
         } catch (Throwable t) {
             // 挂不上不影响本地更新功能，只是关不掉检查更新。
