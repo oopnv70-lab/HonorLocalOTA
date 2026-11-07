@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
@@ -89,8 +90,9 @@ public class OtaHook extends XposedModule {
             log(Log.WARN, TAG, "本地更新入口未挂上，但继续尝试关闭检查更新");
         }
         boolean s = hookCheckSum(cl);
+        boolean v = hookSpoofVersion(cl);
 
-        if (k || s) {
+        if (k || s || v) {
             hooked = true;
         }
     }
@@ -238,6 +240,103 @@ public class OtaHook extends XposedModule {
         } catch (Throwable t) {
             // 挂不上不影响本地更新功能，只是关不掉检查更新。
             log(Log.ERROR, TAG, "挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM + " 失败: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 挂 Request$ParamBuilder 的构造函数，把上报给服务器的版本号改成上一代 OS。
+     *
+     * ── 为什么是这里 ──
+     * 检查更新的请求体由 ParamBuilder.<init>(Request) 组装：
+     * 它把 DependCheckInfo 的各个 getter 取出来，用 CommonRules 的静态 setter
+     * （源码里是 CommonRules 的私有字段直接赋值）写进 CommonRules 对象。
+     * 也就是说，不管上游从属性读、从 oeminfo 读、还是从 GRS 配置读，
+     * 最终都要落进 CommonRules 的 String 字段，再由它序列化成 JSON。
+     * 这一个点是所有上报版本字段的收口。
+     *
+     * ── 为什么不 hook 属性读取 ──
+     * baseVersionInOemInfo / custVersionInOemInfo 走 OemInfoUtil（读 oeminfo 分区），
+     * 根本不经过 SystemPropertiesEx。只 hook 属性会出现
+     * 「属性版说 10，oeminfo 版说 11」的自相矛盾，反而更容易被判定异常。
+     * 在 CommonRules 层面改，两套值一起变，口径一致。
+     *
+     * ── 为什么不碰 keyAttestation ──
+     * attestationChallenge 是 Build.getSerial()，固定值，输出恒定；
+     * TEE 签发的证书只声明「这台是 AAK-AN00」，不含系统版本号。
+     * 改版本不影响它，所以不要动，动了反而验证失败。
+     *
+     * ── 局限 ──
+     * 字段名是 R8 混淆前的原始名（CommonRules 没被混淆字段名），
+     * 但类路径和字段集只对 2.1.1.1（versionCode 205）成立，OUC 一升级即失效。
+     * 取不到的字段会跳过，不会让整个 hook 失败。
+     */
+    private boolean hookSpoofVersion(ClassLoader cl) {
+        try {
+            Class<?> builder = Class.forName(Const.CLS_PARAM_BUILDER, false, cl);
+            Class<?> request = Class.forName(
+                    Const.CLS_REQUEST.replace('/', '.'), false, cl);
+            Class<?> rules = Class.forName(Const.CLS_COMMON_RULES, false, cl);
+
+            // 先把能解析到的字段全部解析好；一个都没有才放弃。
+            final Field[] targets = new Field[Const.SPOOF_FIELDS.length];
+            int found = 0;
+            for (int i = 0; i < Const.SPOOF_FIELDS.length; i++) {
+                try {
+                    Field f = rules.getDeclaredField(Const.SPOOF_FIELDS[i]);
+                    if (f.getType() == String.class) {
+                        f.setAccessible(true);
+                        targets[found++] = f;
+                    }
+                } catch (NoSuchFieldException e) {
+                    log(Log.WARN, TAG, "CommonRules 无字段 " + Const.SPOOF_FIELDS[i] + "，跳过");
+                }
+            }
+            if (found == 0) {
+                log(Log.ERROR, TAG, "CommonRules 里一个版本字段都没解析到，放弃版本伪造");
+                return false;
+            }
+            final java.util.regex.Pattern from =
+                    java.util.regex.Pattern.compile(Const.SPOOF_FROM);
+            final int count = found;
+
+            Constructor<?> ctor = builder.getDeclaredConstructor(request);
+            hook(ctor).intercept(chain -> {
+                Object r = chain.proceed();       // 先让原版把 CommonRules 填满
+                try {
+                    Object self = chain.getThisObject();
+                    Field crField = builder.getDeclaredField("commonRules");
+                    crField.setAccessible(true);
+                    Object cr = crField.get(self);
+                    if (cr == null) {
+                        log(Log.WARN, TAG, "commonRules 为 null，本次不改版本");
+                        return r;
+                    }
+                    for (int i = 0; i < count; i++) {
+                        Field f = targets[i];
+                        Object v = f.get(cr);
+                        if (!(v instanceof String)) {
+                            continue;
+                        }
+                        String s = (String) v;
+                        String n = from.matcher(s).replaceAll(Const.SPOOF_TO);
+                        if (!n.equals(s)) {
+                            f.set(cr, n);
+                            log(Log.INFO, TAG, "版本伪造 " + f.getName()
+                                    + ": " + s + " -> " + n);
+                        }
+                    }
+                } catch (Throwable t) {
+                    log(Log.ERROR, TAG, "改版本字段失败: " + t);
+                }
+                return r;
+            });
+
+            log(Log.INFO, TAG, "已挂 " + Const.CLS_PARAM_BUILDER
+                    + ".<init>，上报版本将改为上一代 OS（" + count + " 个字段）");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 ParamBuilder 构造失败: " + t);
             return false;
         }
     }
