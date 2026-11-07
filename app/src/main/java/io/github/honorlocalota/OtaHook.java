@@ -224,6 +224,20 @@ public class OtaHook extends XposedModule {
 
             hook(sum).intercept(chain -> {
                 Object r = chain.proceed();   // 先让原版把各标志算完
+
+                // ── 关键：两个功能互斥 ──
+                // 压掉「有新版本」标志 = 客户端判定无新版本 = 根本不构造请求体、
+                // 不发网络请求，于是 ParamBuilder.<init> 永不执行，
+                // 版本伪造整套逻辑（含 readSpoofConfig）都走不到。
+                //
+                // 所以这里先看有没有伪造配置：
+                //   有配置 → 放行，让请求真发出去，版本由 hookSpoofVersion 改
+                //   没配置 → 保持原有行为，恒为「无新版本」
+                // 每次调用都重读，改完配置立刻切换行为，不用重装。
+                if (!readSpoofConfig().isEmpty()) {
+                    return r;
+                }
+
                 Object self = chain.getThisObject();
                 try {
                     for (Field f : fields) {
