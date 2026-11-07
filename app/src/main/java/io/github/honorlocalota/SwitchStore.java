@@ -3,20 +3,29 @@ package io.github.honorlocalota;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 
 /**
- * 「屏蔽系统更新」开关的读写。
+ * 两个开关的读写。
  *
- * 这个类被两个进程同时使用，必须零依赖、零 Context 依赖：
- *   ① 模块自己进程 —— 设置界面里切换开关时写
- *   ② com.hihonor.ouc 进程 —— hook l5.b.p() 时读，决定要不要压标志
+ * 这个类被两个进程同时使用：
+ *   ① 模块自己的 App 进程（设置界面）—— 域 u:r:untrusted_app:s0
+ *   ② com.hihonor.ouc 进程（hook 里读）—— 域 platform_app_all
  *
- * 存储就是 Const.SWITCH_FILE 那个纯文本文件，格式 `key=value`。
- * 双方都能直接读写，不需要 root（原因见 Const.SWITCH_FILE 的注释）。
+ * ── 两个进程的访问方式不一样，这是本类最关键的一点 ──
+ *   从 /sys/fs/selinux/policy 里抽出的 local_ota_file 全部 allow 规则：
+ *       adbd / platform_app_all / shell / update_engine
+ *   只有这四个域。所以：
+ *     · OUC 进程（platform_app_all）→ 直接读就行，有 read 权限。
+ *     · 模块 App（untrusted_app）→ 不在名单里，连 getattr 都没有，
+ *       直接读会静默失败、直接写会抛异常。
+ *       必须走 RootShell（su 到 ksu 域）才能访问。
+ *   早期版本只用了直接读写，结果就是「点开关永远保存失败、
+ *   界面永远显示原样」——因为读和写两条路都被 SELinux 拦掉了。
+ *   现在用 RootShell.selfNeedsRoot() 在运行时分流。
  *
- * 读不到的时候一律回落到默认值（true = 屏蔽开启），
+ * 存储就是 Const.SWITCH_FILE 那个纯文本文件，格式 key=value。
+ * 读不到的时候一律回落到默认值，
  * 这是刻意选择的：宁可多屏蔽一次，也不要在配置异常时把整台机器的
  * 自动更新重新放开——那正是用户装这个模块想避免的事。
  */
@@ -24,6 +33,8 @@ final class SwitchStore {
 
     private SwitchStore() {
     }
+
+    // ─────────────── 屏蔽系统更新 ───────────────
 
     /** 读「屏蔽系统更新」开关。任何异常都返回默认值（true）。 */
     static boolean isBlockUpdate() {
@@ -73,9 +84,12 @@ final class SwitchStore {
         return isBlockUpdate() && !isForceFullPackage();
     }
 
-    /** 开关文件当前是否存在。界面上用来区分「从没设置过」和「用户设过」。 */
+    /** 开关文件当前是否存在（按本进程能否看到判断，仅作界面参考）。 */
     static boolean exists() {
         try {
+            if (RootShell.selfNeedsRoot()) {
+                return RootShell.run("[ -f '" + Const.SWITCH_FILE + "' ] && echo 1").ok();
+            }
             return new File(Const.SWITCH_FILE).exists();
         } catch (Throwable t) {
             return false;
@@ -112,6 +126,31 @@ final class SwitchStore {
      * 少一次对象分配，也避免解析过程中的异常影响读取。
      */
     private static String readKey(String key) {
+        String text = readAll();
+        if (text == null) {
+            return null;
+        }
+        for (String raw : text.split("\n")) {
+            String line = raw.trim();
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+            int eq = line.indexOf('=');
+            if (eq <= 0) {
+                continue;
+            }
+            if (key.equals(line.substring(0, eq).trim())) {
+                return line.substring(eq + 1).trim();
+            }
+        }
+        return null;
+    }
+
+    /** 读整个文件。按进程域选择直接读还是走 su。失败返回 null。 */
+    private static String readAll() {
+        if (RootShell.selfNeedsRoot()) {
+            return RootShell.read(Const.SWITCH_FILE);
+        }
         FileInputStream in = null;
         try {
             File f = new File(Const.SWITCH_FILE);
@@ -120,21 +159,12 @@ final class SwitchStore {
             }
             in = new FileInputStream(f);
             BufferedReader br = new BufferedReader(new InputStreamReader(in, "UTF-8"));
+            StringBuilder sb = new StringBuilder();
             String line;
             while ((line = br.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) {
-                    continue;
-                }
-                int eq = line.indexOf('=');
-                if (eq <= 0) {
-                    continue;
-                }
-                if (key.equals(line.substring(0, eq).trim())) {
-                    return line.substring(eq + 1).trim();
-                }
+                sb.append(line).append('\n');
             }
-            return null;
+            return sb.toString();
         } catch (Throwable t) {
             return null;
         } finally {
@@ -150,12 +180,45 @@ final class SwitchStore {
     /**
      * 写入一个键，保留文件里其它键。
      *
-     * 先写临时文件再 rename，避免写一半断电留下残缺文件——
-     * 那会让 OUC 进程读到空文件从而回落到默认值，
-     * 表现为「用户明明关掉了屏蔽，更新提示还是被压掉」。
+     * 整个文件一次性重写（先拼好完整内容再落盘），
+     * 而不是原地改某一行：这样不存在「改到一半」的中间态，
+     * 也就不会出现 OUC 侧读到半个文件从而回落到默认值的情况。
      */
     private static String writeKey(String key, String value) {
-        FileOutputStream out = null;
+        StringBuilder sb = new StringBuilder();
+        sb.append("# 系统包投放模块开关。改完立刻生效，不需要重启「软件更新」。\n");
+
+        // 已有的其它键原样保留
+        String old = readAll();
+        if (old != null) {
+            for (String raw : old.split("\n")) {
+                String t = raw.trim();
+                if (t.isEmpty() || t.startsWith("#")) {
+                    continue;
+                }
+                int eq = t.indexOf('=');
+                if (eq <= 0) {
+                    continue;
+                }
+                if (key.equals(t.substring(0, eq).trim())) {
+                    continue;   // 这个键由下面统一写
+                }
+                sb.append(t).append('\n');
+            }
+        }
+        sb.append(key).append('=').append(value).append('\n');
+
+        return writeAll(sb.toString());
+    }
+
+    /** 整文件写入。按进程域选择直接写还是走 su。 */
+    private static String writeAll(String content) {
+        if (RootShell.selfNeedsRoot()) {
+            return RootShell.write(Const.SWITCH_FILE, content);
+        }
+        // OUC 进程理论上也能写（策略给了 write_create），
+        // 但它不该去写用户配置，这里仍然实现，避免两套语义分叉。
+        java.io.FileOutputStream out = null;
         try {
             File dir = new File(Const.DST_DIR);
             if (!dir.exists() && !dir.mkdirs()) {
@@ -163,52 +226,14 @@ final class SwitchStore {
             }
             File target = new File(Const.SWITCH_FILE);
             File tmp = new File(Const.SWITCH_FILE + ".tmp");
-
-            StringBuilder sb = new StringBuilder();
-            sb.append("# 系统包投放模块开关。改完立刻生效，不需要重启「软件更新」。\n");
-            // 已有的其它键原样保留
-            FileInputStream old = null;
-            if (target.exists()) {
-                try {
-                    old = new FileInputStream(target);
-                    BufferedReader br = new BufferedReader(new InputStreamReader(old, "UTF-8"));
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        String t = line.trim();
-                        if (t.isEmpty() || t.startsWith("#")) {
-                            continue;
-                        }
-                        int eq = t.indexOf('=');
-                        if (eq <= 0) {
-                            continue;
-                        }
-                        if (key.equals(t.substring(0, eq).trim())) {
-                            continue;  // 这个键由下面统一写
-                        }
-                        sb.append(t).append('\n');
-                    }
-                } catch (Throwable ignored) {
-                } finally {
-                    if (old != null) {
-                        try {
-                            old.close();
-                        } catch (Throwable ignored) {
-                        }
-                    }
-                }
-            }
-            sb.append(key).append('=').append(value).append('\n');
-
-            out = new FileOutputStream(tmp);
-            out.write(sb.toString().getBytes("UTF-8"));
+            out = new java.io.FileOutputStream(tmp);
+            out.write(content.getBytes("UTF-8"));
             out.flush();
             out.close();
             out = null;
-
             if (!tmp.renameTo(target)) {
-                // 某些 fuse 挂载上 rename 会失败，退回直接覆盖写
-                FileOutputStream direct = new FileOutputStream(target);
-                direct.write(sb.toString().getBytes("UTF-8"));
+                java.io.FileOutputStream direct = new java.io.FileOutputStream(target);
+                direct.write(content.getBytes("UTF-8"));
                 direct.flush();
                 direct.close();
                 tmp.delete();

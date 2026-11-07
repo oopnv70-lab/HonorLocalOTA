@@ -2,6 +2,8 @@ package io.github.honorlocalota;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -13,8 +15,17 @@ import android.widget.Toast;
 /**
  * 桌面入口：模块设置页。
  *
- * 跑在模块自己的进程里，不参与 OUC 的 hook。它只做一件事：
- * 读写两个开关——「屏蔽系统更新」与「强制全量包」。
+ * 跑在模块自己的 App 进程里（SELinux 域 untrusted_app），不参与 OUC 的 hook。
+ * 它只做一件事：读写两个开关——「屏蔽系统更新」与「强制全量包」。
+ *
+ * ── 为什么读写要放到后台线程 ──
+ *   本进程被 SELinux 挡在 /data/local_ota 之外（local_ota_file 的 allow
+ *   规则只有 adbd / platform_app_all / shell / update_engine 四个域），
+ *   所以每次读写都得 fork 一个 su 进程。fork 是阻塞调用，
+ *   放在主线程会让界面卡一下，甚至触发 ANR。因此：
+ *     读 → reload() 在后台线程做，结果 post 回主线程
+ *     写 → 后台线程做，成功后重新 reload()
+ *   界面上的开关先按用户操作立刻变，写失败再拨回去并提示原因。
  *
  * ── 两个开关的关系 ──
  *   互斥，但不是靠「互相改写」实现的。
@@ -23,17 +34,14 @@ import android.widget.Toast;
  *   标一句「已被覆盖」。这样没有状态需要回滚，也不会出现
  *   两个键写同一文件的中途态。理由详见 SwitchStore.isBlockEffective()。
  *
- * ── 为什么不需要任何权限、也不需要 root ──
- *   开关文件在 /data/local_ota/（权限 0777）。
- *   本模块 uid 实测可直接写，不需要 su。
- *   详见 Const.SWITCH_FILE 的注释。
- *
  * ── 为什么「本地更新」只有说明没有开关 ──
  *   面板（PanelView）是挂到 OUC 界面上的，只要 hook 挂上就存在，
  *   没有需要用户配置的东西。它的状态由 LSPosed 是否启用模块决定，
  *   在这之前加一个本模块自己的开关只会造成「开着但没生效」的困惑。
  */
 public class SettingsActivity extends Activity {
+
+    private final Handler ui = new Handler(Looper.getMainLooper());
 
     private Theme theme;
 
@@ -47,6 +55,17 @@ public class SettingsActivity extends Activity {
     private TextView fullHint;
 
     private TextView statusLine;
+
+    /** 已经读到的当前值。写的时候基于它算另一项，避免两次读文件。 */
+    private boolean curBlock = Const.DEFAULT_BLOCK_UPDATE;
+    private boolean curFull = Const.DEFAULT_FORCE_FULL_PACKAGE;
+
+    /** 上次读到的 root 可用性与文件存在性，失败回滚时复用，避免在 UI 线程 fork su。 */
+    private boolean curHasFile;
+    private boolean curRoot;
+
+    /** 后台读写进行中，防止连点导致并发 fork。 */
+    private volatile boolean busy;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -95,7 +114,14 @@ public class SettingsActivity extends Activity {
         setContentView(root);
         setTitle("系统包投放");
 
-        refresh();
+        reload();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 从别处改了配置文件再回来时，界面要跟上
+        reload();
     }
 
     // ─────────────── 卡片：屏蔽系统更新 ───────────────
@@ -125,15 +151,7 @@ public class SettingsActivity extends Activity {
             if (!fromUser) {
                 return;
             }
-            String err = SwitchStore.setBlockUpdate(checked);
-            if (err != null) {
-                toast("保存失败：" + err);
-                // 存不进去就把 UI 拨回去，避免显示的和实际不一致。
-                // 回拨不触发保存：fromUser 为 false。
-                v.setChecked(!checked);
-                return;
-            }
-            refresh();
+            saveBlock(checked);
         });
 
         return card;
@@ -173,13 +191,7 @@ public class SettingsActivity extends Activity {
             if (!fromUser) {
                 return;
             }
-            String err = SwitchStore.setForceFullPackage(checked);
-            if (err != null) {
-                toast("保存失败：" + err);
-                v.setChecked(!checked);
-                return;
-            }
-            refresh();
+            saveFull(checked);
         });
 
         return card;
@@ -249,7 +261,7 @@ public class SettingsActivity extends Activity {
 
         card.addView(theme.sectionTitle(this, "状态"), theme.matchWrap());
 
-        statusLine = theme.text(this, "", 13, theme.onSurfaceVariant);
+        statusLine = theme.text(this, "读取中…", 13, theme.onSurfaceVariant);
         statusLine.setTypeface(android.graphics.Typeface.MONOSPACE);
         statusLine.setLineSpacing(Theme.dp(this, 4), 1f);
         statusLine.setTextIsSelectable(true);
@@ -258,18 +270,38 @@ public class SettingsActivity extends Activity {
         return card;
     }
 
-    // ─────────────── 状态刷新 ───────────────
+    // ─────────────── 读取 ───────────────
 
     /**
-     * 从开关文件重读并刷新界面。
+     * 后台读配置并刷新界面。
      *
-     * 不用 setChecked 的监听做状态同步，而是每次统一从这里刷：
-     * 两个开关互相影响（全量包会覆盖屏蔽），
-     * 只在一处计算才能保证界面显示与实际判定一致。
+     * 每次都会真的去 fork 一次 su（App 进程读不到该目录），
+     * 所以必须离开主线程。两次读（开关值 + 文件是否存在）合并到
+     * 一次后台任务里，减少 fork 次数。
      */
-    private void refresh() {
-        boolean block = SwitchStore.isBlockUpdate();
-        boolean full = SwitchStore.isForceFullPackage();
+    private void reload() {
+        if (busy) {
+            return;
+        }
+        busy = true;
+        new Thread(() -> {
+            final boolean root = RootShell.available();
+            final boolean block = SwitchStore.isBlockUpdate();
+            final boolean full = SwitchStore.isForceFullPackage();
+            final boolean hasFile = SwitchStore.exists();
+            ui.post(() -> {
+                busy = false;
+                applyState(block, full, hasFile, root);
+            });
+        }, "settings-reload").start();
+    }
+
+    /** 纯 UI 刷新，不读文件、不 fork。 */
+    private void applyState(boolean block, boolean full, boolean hasFile, boolean root) {
+        curBlock = block;
+        curFull = full;
+        curHasFile = hasFile;
+        curRoot = root;
 
         blockSwitch.setChecked(block);
         fullSwitch.setChecked(full);
@@ -291,14 +323,68 @@ public class SettingsActivity extends Activity {
         fullHint.setTextColor(full ? theme.primary : theme.onSurfaceVariant);
 
         StringBuilder sb = new StringBuilder();
-        sb.append("配置 ").append(SwitchStore.exists() ? "已写入文件" : "尚未写入，按默认值生效")
-                .append('\n');
+        sb.append("root ").append(root ? "可用" : "不可用，开关无法保存").append('\n');
+        sb.append("配置 ").append(hasFile ? "已写入文件" : "尚未写入，按默认值生效").append('\n');
         sb.append(Const.KEY_BLOCK_UPDATE).append('=').append(block)
-                .append("（实际生效 ").append(SwitchStore.isBlockEffective()).append("）\n");
+                .append("（实际生效 ").append(block && !full).append("）\n");
         sb.append(Const.KEY_FORCE_FULL_PACKAGE).append('=').append(full).append('\n');
         sb.append("文件 ").append(Const.SWITCH_FILE).append('\n');
         sb.append("安装包目录 ").append(Const.DST_DIR);
         statusLine.setText(sb.toString());
+    }
+
+    // ─────────────── 写入 ───────────────
+
+    private void saveBlock(boolean on) {
+        if (busy) {
+            // 上一次还没写完，把开关拨回去，避免界面和实际不一致
+            blockSwitch.setChecked(curBlock);
+            toast("上一个操作还没完成");
+            return;
+        }
+        busy = true;
+        blockSwitch.setEnabled(false);
+        new Thread(() -> {
+            final String err = SwitchStore.setBlockUpdate(on);
+            finishSave(err, "屏蔽系统更新");
+        }, "settings-save-block").start();
+    }
+
+    private void saveFull(boolean on) {
+        if (busy) {
+            fullSwitch.setChecked(curFull);
+            toast("上一个操作还没完成");
+            return;
+        }
+        busy = true;
+        fullSwitch.setEnabled(false);
+        new Thread(() -> {
+            final String err = SwitchStore.setForceFullPackage(on);
+            finishSave(err, "强制全量包");
+        }, "settings-save-full").start();
+    }
+
+    /**
+     * 写完之后统一收尾：失败就把界面拨回读到的真实值并说明原因，
+     * 成功就重新读一遍让两个开关的联动状态一起更新。
+     *
+     * 注意这里不调用 SwitchStore.exists() / RootShell.available()：
+     * 两者都会 fork su，在 UI 线程做会卡界面。
+     * 失败回滚用的 hasFile/root 直接取上次 reload 读到的缓存值。
+     */
+    private void finishSave(String err, String what) {
+        ui.post(() -> {
+            blockSwitch.setEnabled(true);
+            fullSwitch.setEnabled(true);
+            busy = false;
+            if (err != null) {
+                toast(what + "保存失败：" + err);
+                // 拨回读到的真实状态，别让界面撒谎
+                applyState(curBlock, curFull, curHasFile, curRoot);
+                return;
+            }
+            reload();
+        });
     }
 
     private void toast(String s) {
