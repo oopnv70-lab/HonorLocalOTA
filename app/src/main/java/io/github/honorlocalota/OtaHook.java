@@ -411,7 +411,7 @@ public class OtaHook extends XposedModule {
      * 文件格式：key=value，# 开头是注释，值两侧空白会被去掉。
      * 读不到就返回空表，调用方按原版版本上报（即不伪造）。
      */
-    private java.util.Map<String, String> readSpoofConfig() {
+    private static java.util.Map<String, String> readSpoofConfig() {
         java.util.Map<String, String> out = new java.util.HashMap<>();
         for (String path : Const.SPOOF_CONFIG_PATHS) {
             java.io.BufferedReader br = null;
