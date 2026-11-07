@@ -25,6 +25,39 @@ final class Const {
     /** 作用域包名。 */
     static final String PKG_OUC = "com.hihonor.ouc";
 
+    // ─────────────── 开关文件 ───────────────
+
+    /**
+     * 开关文件路径。两个进程共享，不需要 root。
+     *
+     * ── 为什么放这里而不是 SharedPreferences ──
+     *   SharedPreferences 按 uid 隔离：本模块是自己的 uid，
+     *   com.hihonor.ouc 是另一个 uid，读不到彼此的 prefs。
+     *   而 libxposed 102 的 API 面里没有跨进程 prefs 通道
+     *   （已核过 api-102.0.0 的全部 class，只有 hook 相关的东西）。
+     *   所以只能落到双方都能访问的文件上。
+     *
+     * ── 为什么这个路径两个进程都能用（实测，不是推断）──
+     *   /data/local_ota 权限 drwxrwxrwx system:cache，标签 local_ota_file。
+     *   · 模块进程（普通 app uid）：实测 su 10357 -c touch → rc=0，可读写。
+     *     所以 App 里的开关不需要 root 就能保存。
+     *   · OUC 进程（platform_app 域）：system_ext_sepolicy.cil
+     *     allow platform_app_all local_ota_file，本来就允许访问，
+     *     而且这个目录就是它自己扫描安装包的目录，必然可读。
+     */
+    static final String SWITCH_FILE = DST_DIR + "/module_switch.conf";
+
+    /**
+     * 「屏蔽系统更新」的开关键名。
+     *
+     * 只写这一个键，值为 true / false。
+     * 文件不存在、读不到、键缺失 → 一律按 true 处理（默认开启）。
+     */
+    static final String KEY_BLOCK_UPDATE = "block_update";
+
+    /** 开关默认值：默认开启屏蔽。 */
+    static final boolean DEFAULT_BLOCK_UPDATE = true;
+
     private Const() {
     }
 }

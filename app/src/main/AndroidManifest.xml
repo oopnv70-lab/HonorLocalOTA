@@ -3,12 +3,15 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-      模块本体是 LSPosed 插件，界面盖在 com.hihonor.ouc 的进程里。
+      模块本体是 LSPosed 插件，界面盖在 com.hihonor.ouc 的进程里：
          · hook K / ActivityResult → 把「本地更新」入口投放到三点菜单
-         · hook l5.b.p() → 检查更新恒为「无新版本」
-      模块自身不需要任何 Activity，也不需要任何权限：
-         · 不申请存储权限（面板读包用的是 SAF，见 PanelView）
-         · 没有桌面图标，只在 LSPosed 模块列表里出现
+         · hook l5.b.p() → 按开关决定是否把检查更新压成「无新版本」
+      同时提供一个桌面入口 SettingsActivity，用来开关「屏蔽系统更新」。
+
+      不需要任何权限：
+         · 没有存储权限——开关文件写在 /data/local_ota/（0777），
+           本模块 uid 可直接读写，实测 rc=0。
+         · 面板选包走系统 SAF，也不占存储权限。
     -->
 
     <application
@@ -17,6 +20,21 @@
         android:hasCode="true"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        tools:ignore="AllowBackup" />
+        android:theme="@style/ModuleTheme"
+        tools:ignore="AllowBackup">
+
+        <activity
+            android:name=".SettingsActivity"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:excludeFromRecents="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
 
 </manifest>

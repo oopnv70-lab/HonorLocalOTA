@@ -218,6 +218,11 @@ public class OtaHook extends XposedModule {
      * 只压住 OUC 自己。CheckNewVersionReceiver 还会往 com.hihonor.phoneservice
      * 发一条 HAS_NEW_ROM 广播，那条链不在本 hook 覆盖范围内。
      * 类名与字段名都是混淆产物，只对本 APK 版本成立。
+     *
+     * ── 开关 ──
+     * 受「屏蔽系统更新」开关控制，开关文件见 Const.SWITCH_FILE。
+     * 默认开启（Const.DEFAULT_BLOCK_UPDATE = true），所以装完就生效，
+     * 用户不用先去开一次。关掉后原样放行，OUC 恢复真实的更新提示。
      */
     private boolean hookCheckSum(ClassLoader cl) {
         try {
@@ -235,6 +240,13 @@ public class OtaHook extends XposedModule {
 
             hook(sum).intercept(chain -> {
                 Object r = chain.proceed();   // 先让原版把各标志算完
+
+                // 每次调用都重新读开关文件，不缓存：
+                // 用户在设置的 App 里关掉屏蔽后，OUC 不需要重启就能回到真实行为。
+                // 一次读文件的开销远小于它本身的网络请求，不值得为它做缓存失效逻辑。
+                if (!SwitchStore.isBlockUpdate()) {
+                    return r;   // 用户关掉了屏蔽，原样放行
+                }
 
                 Object self = chain.getThisObject();
                 try {

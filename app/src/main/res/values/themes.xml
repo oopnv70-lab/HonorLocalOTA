@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      主题只做三件事：
+        1. 去掉 ActionBar（界面自己画页头，避免荣耀 ROM 的主题覆盖）
+        2. 背景交给代码里按深浅色算，这里只给一个占位色防止闪白
+        3. 状态栏/导航栏跟随深浅色，避免深色模式下状态栏还是白的
+    -->
+    <style name="ModuleTheme" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">@color/page_bg</item>
+        <item name="android:statusBarColor">@color/page_bg</item>
+        <item name="android:navigationBarColor">@color/page_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+</resources>

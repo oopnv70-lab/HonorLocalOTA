@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_bg">#1565C0</color>
+
+    <!-- 页面底色。只是防首帧闪白的占位，真正配色在 Theme.java 里按深浅色算。 -->
+    <color name="page_bg">#F7F9FC</color>
 </resources>
