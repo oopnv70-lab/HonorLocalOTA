@@ -66,16 +66,22 @@ final class Const {
     /**
      * 配置文件按顺序查找，第一个能读到的生效。
      *
-     * 放两个位置的原因：
-     *   1) 第一条是 OUC 自己的外部私有目录，OUC 一定有权限，
-     *      而且你从文件管理器就能改，不需要 root。
-     *   2) 第二条是本地更新用的那个 0777 目录，作为兜底。
+     * 为什么是 /sdcard/Download：
+     *   配置文件要「模块写、OUC 读」，两边必须是同一个文件。
+     *   实测过的三条路径：
+     *     Android/data/com.hihonor.ouc/files  → 模块 uid 10357 写被拒
+     *        （Android 11 起 Android/data/<其他包名> 平台强制隔离，
+     *          持有 MANAGE_EXTERNAL_STORAGE 也进不去）
+     *     /data/local_ota                      → SELinux local_ota_file，
+     *        只有 platform_app 域可写，untrusted_app 写不进去
+     *     /sdcard/Download                     → 可行。OUC 已有
+     *        MANAGE_EXTERNAL_STORAGE(granted)，模块申请同一权限即可读写
      *
      * 格式是 key=value，# 开头是注释，值为空的项表示「这个字段不改」。
      * 每次构造请求都重新读文件，所以改完立刻生效，不用重启 OUC。
      */
     static final String[] SPOOF_CONFIG_PATHS = {
-            "/storage/emulated/0/Android/data/com.hihonor.ouc/files/version_spoof.conf",
+            "/storage/emulated/0/Download/version_spoof.conf",
             "/data/local_ota/version_spoof.conf"
     };
 

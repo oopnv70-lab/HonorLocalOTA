@@ -3,24 +3,55 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-      这个模块不声明任何 Activity，也不声明任何权限。
-
-      原因：界面是直接盖在 com.hihonor.ouc 的 MainEntranceActivity 上的一层 View，
-      运行在 OUC 进程里（由 LSPosed 加载），不是独立组件。所以：
-        · 没有桌面图标，没有可启动组件；
-        · 不需要 exported、不需要跨进程 Intent；
-        · 写 /data/local_ota 靠 OUC 自身的 platform_app 域权限，不需要 root；
-        · 选文件走系统 SAF，不需要存储权限。
-
-      装完之后只要在 LSPosed 里勾选并重启「软件更新」，三点菜单里就会出现原版的
-      「本地更新」项（判定条件见 kh.l.C()），点它进我们的面板。
+      模块本体是 LSPosed 插件，界面盖在 com.hihonor.ouc 的进程里。
+      从 v2 起额外声明一个 SettingsActivity，提供桌面入口：
+        · 用来编辑 version_spoof.conf（版本伪造配置）
+        · 这个 Activity 跑在模块自己的进程里，和 OUC 里的 hook 互不影响
+      需要 MANAGE_EXTERNAL_STORAGE：配置文件放在 /sdcard/Download/，
+      这是双方都能访问的普通路径（见下面注释）。
     -->
+
+    <!--
+      为什么不用 Android/data/com.hihonor.ouc/files：
+        Android 11 起 Android/data/<其他包名> 是平台强制隔离的，
+        任何应用（含持有 MANAGE_EXTERNAL_STORAGE 的）都无法进入。
+        实测本模块 uid 10357 写入该目录直接被 Permission denied。
+      为什么不用 /data/local_ota：
+        SELinux 类型 local_ota_file，只有 platform_app 域可写（OUC 在
+        platform_app 域下所以能写），untrusted_app 写不进去。
+      所以选 /sdcard/Download/：OUC 已有 MANAGE_EXTERNAL_STORAGE（granted），
+      本模块也申请同一权限后即可读写同一个文件。
+    -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <application
         android:label="@string/app_name"
         android:description="@string/module_description"
         android:hasCode="true"
         android:allowBackup="false"
-        tools:ignore="MissingApplicationIcon,AllowBackup" />
+        android:icon="@mipmap/ic_launcher"
+        tools:ignore="AllowBackup">
+
+        <activity
+            android:name=".SettingsActivity"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:excludeFromRecents="false"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
 
 </manifest>

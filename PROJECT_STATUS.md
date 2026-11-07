@@ -144,12 +144,45 @@ OUC 域 `u:r:platform_app_36:s0:c512,c768` 属于 `platform_app_all`，**有完�
 |---|---|
 | 三个前置条件 | ✅ 已凑齐并实测 |
 | 不需 root 的 SELinux 根据 | ✅ 已逐条定位到行 |
-| 代码（3 文件 + Manifest + strings + proguard） | ✅ 已写完 |
-| 静态自检（check3/check4/check5 + brace.py） | ✅ 全绿，修掉 5 个真实问题 |
-| 推送 | ✅ `ab894f25`（parent `0219c042`，tree `adbe4b1a`） |
-| `ab894f25` Actions 构建 | ❓ **未确认** |
-| 真机验证链路 | ⬜ 待构建产物下载后 |
-| 降级可行性调研 | ✅ 已完成（只读） |
+| 代码（4 文件 + Manifest + res + strings + proguard） | ✅ 已写完 |
+| 静态自检（javac 桩编译 SettingsActivity + Const） | ✅ 通过 |
+| 功能一：关闭检查更新（hook `l5.b.p()`） | ✅ 用户实测「没有新版本更新提示了」，封板 |
+| 功能二：版本伪造（hook `Request$ParamBuilder.<init>`） | 🔄 代码完成，待安装验证 |
+
+### 8.1 功能一（已封板）
+
+hook `l5.b.p()`（`CheckMode.java`，`protected void p()`），把 h/i/j/k/l/m/n/o 八个 boolean 全压 false。
+10 个子类无覆盖；`h` 的写入点为 smali 行 119（构造）、521（`q()` 重置）、2967（真正结论 `h = l || i`）。
+产物 run#6 `411b3bf5`，APK sha256 `e47a756c…`，与设备已装、`Download/HonorLocalOTA.apk` 三方一致。
+**用户已实测生效，此线不再改动。**
+
+### 8.2 功能二（进行中）
+
+hook 点：`com.hihonor.android.hnouc.check.model.checkinfo.Request$ParamBuilder.<init>(Request)`。
+构造函数体内逐个 `invoke DependCheckInfo->getXxx()` 再写入 `CommonRules` 的私有字段，
+是所有上报版本字段的唯一收口。在 `chain.proceed()` 之后按配置文件覆盖 8 个 String 字段。
+
+不选 `SystemPropertiesEx.get` 的理由：`baseVersionInOemInfo` / `custVersionInOemInfo`
+走 `r9/d3`（`OemInfoUtil.java`）读 oeminfo 分区，不经过属性接口，
+只 hook 属性会造成两套值不一致。
+
+**配置文件路径（本轮变更）**：`/sdcard/Download/version_spoof.conf`
+
+| 候选路径 | 结论 |
+|---|---|
+| `Android/data/com.hihonor.ouc/files/` | ❌ 模块 uid 10357 写被拒。Android 11 起 `Android/data/<其他包名>` 平台强制隔离，持有 MANAGE_EXTERNAL_STORAGE 也进不去 |
+| `/data/local_ota/` | ❌ SELinux `local_ota_file`，只有 `platform_app` 域可写，untrusted_app 写不进去 |
+| `/sdcard/Download/` | ✅ OUC 已有 MANAGE_EXTERNAL_STORAGE（granted），模块申请同一权限即可读写 |
+
+**桌面入口**：`SettingsActivity`（manifest 声明 MAIN/LAUNCHER），
+顶部只读显示本机真实版本串供对照，中间全文编辑配置文件，底部保存/重载/清空。
+首次打开若没有「所有文件访问」权限会主动跳系统设置页。
+`proguard-rules.pro` 已加 `-keep class io.github.honorlocalota.SettingsActivity { *; }`。
+
+**attestation 不受影响**（已查证）：`attestationChallenge = ia/a.d()` → `r9/w1.V2()` →
+`Build.getSerial()`，本机 `AAXL6R5C04000374`，固定值非随机 nonce；
+`r9/l2` 的 `attestDeviceIds` 只绑定 deviceIds，TEE 证书不声明系统版本号。
+所以版本伪造不会破坏 attestation。
 
 ---
 
