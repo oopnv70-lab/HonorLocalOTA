@@ -242,7 +242,7 @@ public class OtaHook extends XposedModule {
                 // 「已是最新版本」，无论服务器回了什么，等于把功能二
                 // 的效果完全遮住。验证功能二时必须关掉这里。
                 java.util.Map<String, String> cfg = readSpoofConfig();
-                String sw = cfg.get(KEY_BLOCK_CHECK);
+                String sw = cfg.get(Const.KEY_BLOCK_CHECK);
                 boolean block = "1".equals(sw) || "true".equalsIgnoreCase(sw);
                 if (!block) {
                     log(Log.INFO, TAG, "block_check 未开启，功能一放行（标志保持原判）");
