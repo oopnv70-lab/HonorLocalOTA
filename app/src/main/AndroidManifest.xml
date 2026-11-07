@@ -7,30 +7,24 @@
       从 v2 起额外声明一个 SettingsActivity，提供桌面入口：
         · 用来编辑 version_spoof.conf（版本伪造配置）
         · 这个 Activity 跑在模块自己的进程里，和 OUC 里的 hook 互不影响
-      需要 MANAGE_EXTERNAL_STORAGE：配置文件放在 /sdcard/Download/，
-      这是双方都能访问的普通路径（见下面注释）。
+      需要 root：配置文件放在 OUC 自己的外部私有目录，
+      该目录对其他 app 平台隔离，必须由 root 写入（本模块已在
+      KernelSU 授权列表里，实测 su 可用）。
     -->
 
     <!--
-      为什么不用 Android/data/com.hihonor.ouc/files：
-        Android 11 起 Android/data/<其他包名> 是平台强制隔离的，
-        任何应用（含持有 MANAGE_EXTERNAL_STORAGE 的）都无法进入。
-        实测本模块 uid 10357 写入该目录直接被 Permission denied。
-      为什么不用 /data/local_ota：
-        SELinux 类型 local_ota_file，只有 platform_app 域可写（OUC 在
-        platform_app 域下所以能写），untrusted_app 写不进去。
-      所以选 /sdcard/Download/：OUC 已有 MANAGE_EXTERNAL_STORAGE（granted），
-      本模块也申请同一权限后即可读写同一个文件。
+      为什么需要 root：
+        配置文件 /storage/emulated/0/Android/data/com.hihonor.ouc/files/
+        /version_spoof.conf 在 OUC 自己的外部私有目录里。
+        Android 11 起该目录对其他 app 平台强制隔离，实测本模块
+        uid 10357 写入被 Permission denied，即使持有
+        MANAGE_EXTERNAL_STORAGE 也进不去。
+        本模块 io.github.honorlocalota 已在 KernelSU 授权列表
+        （/data/adb/ksu/.allowlist 第一行），实测
+        su 10357 -c '/system/bin/su -c id' → uid=0(root)，
+        因此由 Activity 通过 su 写入、由 OUC 直接读取。
+      所以这里不申请任何存储权限，不需要你手动授权。
     -->
-    <uses-permission
-        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
-        tools:ignore="ScopedStorage" />
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
 
     <application
         android:label="@string/app_name"

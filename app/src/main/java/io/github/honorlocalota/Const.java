@@ -66,24 +66,30 @@ final class Const {
     /**
      * 配置文件按顺序查找，第一个能读到的生效。
      *
-     * 为什么是 /sdcard/Download：
-     *   配置文件要「模块写、OUC 读」，两边必须是同一个文件。
-     *   实测过的三条路径：
-     *     Android/data/com.hihonor.ouc/files  → 模块 uid 10357 写被拒
-     *        （Android 11 起 Android/data/<其他包名> 平台强制隔离，
-     *          持有 MANAGE_EXTERNAL_STORAGE 也进不去）
-     *     /data/local_ota                      → SELinux local_ota_file，
-     *        只有 platform_app 域可写，untrusted_app 写不进去
-     *     /sdcard/Download                     → 可行。OUC 已有
-     *        MANAGE_EXTERNAL_STORAGE(granted)，模块申请同一权限即可读写
+     * 路径选择依据（实测，不是推断）：
+     *   本模块 io.github.honorlocalota 已在 KernelSU 授权列表里
+     *   （/data/adb/ksu/.allowlist 第一行），进程内可直接 su。
+     *   实测 su 10357 -c '/system/bin/su -c id' → uid=0(root) u:r:ksu:s0。
+     *
+     *   所以配置文件可以放在 OUC 自己的外部私有目录里，由本模块
+     *   通过 root 写入、由 OUC 直接读取（同 uid 同目录，零权限问题）：
+     *     /storage/emulated/0/Android/data/com.hihonor.ouc/files/
+     *       → 实测 root 写入 OK，标签 fuse，属主 root:ext_data_rw
+     *         （必须 root 写，普通 app uid 10357 会被 Android 11+
+     *          的 Android/data 隔离挡住）
+     *     /data/local_ota/
+     *       → 实测 root 写入 OK，标签 local_ota_file，作为兜底
      *
      * 格式是 key=value，# 开头是注释，值为空的项表示「这个字段不改」。
      * 每次构造请求都重新读文件，所以改完立刻生效，不用重启 OUC。
      */
     static final String[] SPOOF_CONFIG_PATHS = {
-            "/storage/emulated/0/Download/version_spoof.conf",
+            "/storage/emulated/0/Android/data/com.hihonor.ouc/files/version_spoof.conf",
             "/data/local_ota/version_spoof.conf"
     };
+
+    /** su 可执行文件路径（KernelSU 在 /system/bin/su）。 */
+    static final String SU_BIN = "/system/bin/su";
 
     /** 配置文件模板内容，面板/文档里可以直接引用。 */
     static final String SPOOF_TEMPLATE =

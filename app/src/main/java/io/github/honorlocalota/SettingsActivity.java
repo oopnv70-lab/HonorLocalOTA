@@ -1,13 +1,8 @@
 package io.github.honorlocalota;
 
 import android.app.Activity;
-import android.content.Intent;
 import android.graphics.Color;
-import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
-import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -22,42 +17,47 @@ import android.widget.Toast;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
  * 桌面入口。
  *
- * 这个 Activity 跑在模块自己的进程里，不参与 OUC 的 hook，
+ * 跑在模块自己的进程里，不参与 OUC 的 hook，
  * 唯一的职责是：把 version_spoof.conf 读写出来给你改。
+ *
+ * 写文件走 root：
+ *   本模块 io.github.honorlocalota 已在 KernelSU 授权列表里
+ *   （/data/adb/ksu/.allowlist 第一行），进程内可直接 su。
+ *   实测 su 10357 -c '/system/bin/su -c id' → uid=0(root)。
+ *
+ *   目标文件在 OUC 自己的外部私有目录：
+ *     /storage/emulated/0/Android/data/com.hihonor.ouc/files/
+ *   这个目录从 Android 11 起对其他 app 平台强制隔离，
+ *   普通 app uid 写会直接 Permission denied（已实测），
+ *   但 root 下写入正常（已实测 OK）。所以必须走 su，
+ *   不需要申请 MANAGE_EXTERNAL_STORAGE，也不需要你手动授权。
  *
  * 为什么用「一个大文本框」而不是逐字段输入框：
  *   版本串的格式不是固定的，SP 号、C 号、R 号、P 号都可能变，
  *   做成一堆输入框反而限制了你试别的组合。
  *   直接给全文编辑，你想怎么拼就怎么拼，保存后立刻去点检查更新即可。
- *
- * 界面分三块：
- *   1. 顶部：本机当前真实值（只读），供你对照格式
- *   2. 中间：配置文件全文，可编辑
- *   3. 底部：保存 / 重载 / 清空 三个按钮
  */
 public class SettingsActivity extends Activity {
 
-    private static final String TAG = "HonorLocalOTA";
-
-    /** 主配置文件，和 Const.SPOOF_CONFIG_PATHS[0] 保持一致。
-     *
-     * 放 /sdcard/Download 的原因见 Const.SPOOF_CONFIG_PATHS 的注释：
-     * OUC 的外部私有目录在 Android 11+ 对其他应用强制隔离，写不进去。
+    /**
+     * 主配置文件，和 Const.SPOOF_CONFIG_PATHS[0] 保持一致。
+     * OUC 自己的外部私有目录，root 写入、OUC 直接读，零权限问题。
      */
     private static final String CONF_PATH =
-            "/storage/emulated/0/Download/version_spoof.conf";
+            "/storage/emulated/0/Android/data/com.hihonor.ouc/files/version_spoof.conf";
 
     /** 备选位置，主位置写不进去时用。 */
     private static final String CONF_PATH_ALT = "/data/local_ota/version_spoof.conf";
+
+    /** OUC 的 uid，写文件后要把属主改回它，否则 OUC 自己可能读不了。 */
+    private static final String OUC_UID = "10132";
 
     private EditText editor;
     private TextView status;
@@ -83,8 +83,8 @@ public class SettingsActivity extends Activity {
 
         // ── 2. 配置编辑区 ──
         TextView hint = new TextView(this);
-        hint.setText("下面的内容保存到：\n" + CONF_PATH
-                + "\n去掉行首 # 才会生效；留空的项不改。");
+        hint.setText("写入：" + CONF_PATH
+                + "\n去掉行首 # 才会生效；留空的项不改。保存走 root，不需要额外授权。");
         hint.setTextSize(11);
         hint.setTextColor(Color.parseColor("#888888"));
         hint.setPadding(0, 0, 0, dp(6));
@@ -105,11 +105,10 @@ public class SettingsActivity extends Activity {
         scroll.addView(editor, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        root.addView(scroll, lp);
+        root.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // ── 3. 按钮 ──
+        // ── 3. 状态 + 按钮 ──
         status = new TextView(this);
         status.setTextSize(12);
         status.setPadding(0, dp(8), 0, dp(8));
@@ -127,6 +126,7 @@ public class SettingsActivity extends Activity {
         reload.setText("重载");
         reload.setOnClickListener(v -> {
             editor.setText(readConf());
+            refreshStatus();
             toast("已重新读取");
         });
         bar.addView(reload, weight());
@@ -135,6 +135,7 @@ public class SettingsActivity extends Activity {
         clear.setText("清空");
         clear.setOnClickListener(v -> {
             editor.setText(Const.SPOOF_TEMPLATE);
+            refreshStatus();
             toast("已填入模板，记得保存");
         });
         bar.addView(clear, weight());
@@ -145,60 +146,17 @@ public class SettingsActivity extends Activity {
 
         setContentView(root);
         setTitle("系统包投放 · 版本伪造");
-
-        // MANAGE_EXTERNAL_STORAGE 必须用户在系统设置里手动授予，
-        // 没有它写不了 /sdcard/Download，界面会一直保存失败，所以主动引导一次。
-        ensureStoragePermission();
-    }
-
-    /**
-     * 检查并引导授予「所有文件访问」权限。
-     *
-     * 没有这个权限也能用，只是保存会失败（会退到 /data/local_ota，那也需要 root）。
-     * 所以要主动弹一次系统设置页，避免出现「点了保存没反应」。
-     */
-    private void ensureStoragePermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return; // Android 10 及以下按旧存储模型，不用管
-        }
-        try {
-            if (Environment.isExternalStorageManager()) {
-                refreshStatus();
-                return;
-            }
-            setStatus("需要「所有文件访问」权限才能写 " + CONF_PATH
-                    + "\n正在打开系统设置，请找到本应用并打开开关。", true);
-            Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-            i.setData(Uri.parse("package:" + getPackageName()));
-            startActivity(i);
-        } catch (Throwable t) {
-            // 部分 ROM 没有这个 Action，退回全部应用列表页
-            try {
-                startActivity(new Intent(
-                        Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-            } catch (Throwable ignored) {
-                setStatus("无法打开权限设置页，请手动到系统设置里给本应用"
-                        + "「所有文件访问」权限。", true);
-            }
-        }
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        // 从权限设置页返回后重新判断一次
-        if (status != null) {
-            refreshStatus();
-        }
+        refreshStatus();
     }
 
     /** 本机当前真实上报值，帮你确定要填的格式。 */
     private String buildCurrentText() {
         StringBuilder sb = new StringBuilder();
-        sb.append("本机当前真实值（点检查更新时会原样上报）：\n");
+        sb.append("本机当前真实值（对照格式用）：\n");
         appendProp(sb, "ro.comp.hl.product_base_version", "→ productBaseVersion");
-        appendProp(sb, "ro.comp.hl.product_cust_version", "（cVersion 的来源）");
-        appendProp(sb, "ro.build.display.id", "（完整版本串）");
+        appendProp(sb, "ro.comp.hl.product_cust_version", "→ cVersion");
+        appendProp(sb, "ro.build.display.id", "→ deviceDisplayVersion");
+        sb.append("  root = ").append(hasRoot() ? "可用" : "不可用").append('\n');
         return sb.toString();
     }
 
@@ -222,26 +180,62 @@ public class SettingsActivity extends Activity {
         }
     }
 
+    /** 探测 su 是否可用（跑一次 id）。 */
+    private boolean hasRoot() {
+        try {
+            Proc p = su("id");
+            return p != null && p.code == 0 && p.out.contains("uid=0");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     /** 读配置：主位置优先，读不到再读备选，都读不到给模板。 */
     private String readConf() {
         for (String p : new String[]{CONF_PATH, CONF_PATH_ALT}) {
-            File f = new File(p);
-            if (!f.exists()) {
-                continue;
+            // 先用 root 读（主位置普通权限读不到）
+            String viaRoot = readViaRoot(p);
+            if (viaRoot != null) {
+                return viaRoot;
             }
-            try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(new FileInputStream(f), "UTF-8"))) {
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = br.readLine()) != null) {
-                    sb.append(line).append('\n');
-                }
-                return sb.toString();
-            } catch (Throwable ignored) {
-                // 换下一个位置
+            // 备选位置可能普通权限就能读
+            String viaJava = readViaJava(p);
+            if (viaJava != null) {
+                return viaJava;
             }
         }
         return Const.SPOOF_TEMPLATE;
+    }
+
+    /** root 读文件，失败返回 null。 */
+    private String readViaRoot(String path) {
+        try {
+            Proc p = su("cat '" + path + "' 2>/dev/null");
+            if (p != null && p.code == 0 && !p.out.isEmpty()) {
+                return p.out;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** 普通 Java 读，失败返回 null。 */
+    private String readViaJava(String path) {
+        File f = new File(path);
+        if (!f.exists() || !f.canRead()) {
+            return null;
+        }
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(new FileInputStream(f), "UTF-8"))) {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void doSave() {
@@ -250,34 +244,50 @@ public class SettingsActivity extends Activity {
 
         String err = writeConf(CONF_PATH, text);
         if (err != null) {
-            // 主位置失败，退到备选位置
             String err2 = writeConf(CONF_PATH_ALT, text);
             if (err2 != null) {
                 setStatus("保存失败：\n主位置 " + err + "\n备选 " + err2, true);
                 return;
             }
-            setStatus("已保存到备选位置 " + CONF_PATH_ALT
+            setStatus("已保存到备选 " + CONF_PATH_ALT
                     + "（有效项 " + effective + "）。", false);
-        } else {
-            setStatus("已保存（有效项 " + effective + "）。"
-                    + "现在去系统更新里点「检查更新」，日志会打印实际替换结果。", false);
+            return;
         }
+        setStatus("已保存（有效项 " + effective + "）。"
+                + "现在去系统更新点「检查更新」，LSPosed 日志会打印实际替换结果。", false);
+        toast("已保存");
     }
 
+    /**
+     * root 写文件。返回 null 表示成功，否则返回错误描述。
+     *
+     * 用 base64 传内容，避免版本串里的空格、括号、# 被 shell 解释。
+     * 先写临时文件再 mv，避免写一半留下残缺文件。
+     * 写完把属主改回 OUC 的 uid，保证 OUC 自己能读。
+     */
     private String writeConf(String path, String text) {
         try {
-            File f = new File(path);
-            File dir = f.getParentFile();
-            if (dir != null && !dir.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                dir.mkdirs();
+            String b64 = android.util.Base64.encodeToString(
+                    text.getBytes("UTF-8"), android.util.Base64.NO_WRAP);
+            String tmp = path + ".tmp";
+            String cmd = "printf '%s' '" + b64 + "' | base64 -d > '" + tmp + "'"
+                    + " && chmod 660 '" + tmp + "'"
+                    + " && chown " + OUC_UID + ":ext_data_rw '" + tmp + "' 2>/dev/null"
+                    + " ; mv -f '" + tmp + "' '" + path + "'"
+                    + " && echo WROTE_OK";
+            Proc p = su(cmd);
+            if (p == null) {
+                return "su 不可用（本模块未获 KernelSU 授权？）";
             }
-            try (OutputStreamWriter w = new OutputStreamWriter(
-                    new FileOutputStream(f), "UTF-8")) {
-                w.write(text);
-                w.flush();
+            if (p.code == 0 && p.out.contains("WROTE_OK")) {
+                // 顺手也放一份到 Download，方便你在文件管理器里直接看
+                su("printf '%s' '" + b64 + "' | base64 -d > '"
+                        + "/storage/emulated/0/Download/version_spoof.conf'"
+                        + " ; chmod 660 /storage/emulated/0/Download/version_spoof.conf"
+                        + " 2>/dev/null");
+                return null;
             }
-            return null;
+            return "exit=" + p.code + " " + p.err.trim();
         } catch (Throwable t) {
             return String.valueOf(t);
         }
@@ -329,5 +339,49 @@ public class SettingsActivity extends Activity {
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         p.setMargins(dp(2), 0, dp(2), 0);
         return p;
+    }
+
+    // ─────────────── root 执行 ───────────────
+
+    /** su 执行结果。 */
+    private static final class Proc {
+        int code;
+        String out = "";
+        String err = "";
+    }
+
+    /**
+     * 用 su 执行一条命令。
+     *
+     * 直接 ProcessBuilder(SU_BIN, "-c", cmd)，不经过额外 sh 包装，
+     * 避免多一层转义。
+     */
+    private Proc su(String cmd) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(Const.SU_BIN, "-c", cmd);
+            Process pr = pb.start();
+            StringBuilder o = new StringBuilder();
+            StringBuilder e = new StringBuilder();
+            readAll(pr.getInputStream(), o);
+            readAll(pr.getErrorStream(), e);
+            Proc p = new Proc();
+            p.code = pr.waitFor();
+            p.out = o.toString();
+            p.err = e.toString();
+            return p;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private void readAll(java.io.InputStream in, StringBuilder sb) {
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(in, "UTF-8"))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        } catch (Throwable ignored) {
+        }
     }
 }
