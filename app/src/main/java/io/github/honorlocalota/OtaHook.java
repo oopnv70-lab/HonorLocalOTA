@@ -259,92 +259,81 @@ public class OtaHook extends XposedModule {
     }
 
     /**
-     * 挂 Request$ParamBuilder 的构造函数，把上报给服务器的版本号改成上一代 OS。
+     * 在「读系统属性」这一层伪造版本号。
      *
-     * ── 为什么是这里 ──
-     * 检查更新的请求体由 ParamBuilder.<init>(Request) 组装：
-     * 它把 DependCheckInfo 的各个 getter 取出来，用 CommonRules 的静态 setter
-     * （源码里是 CommonRules 的私有字段直接赋值）写进 CommonRules 对象。
-     * 也就是说，不管上游从属性读、从 oeminfo 读、还是从 GRS 配置读，
-     * 最终都要落进 CommonRules 的 String 字段，再由它序列化成 JSON。
-     * 这一个点是所有上报版本字段的收口。
+     * ── 为什么改这里 ──
+     * 版本号在 OUC 里唯一的来源就是系统属性。整个 APK 里对属性读取
+     * 只有一处入口：com.hihonor.android.os.SystemPropertiesEx，
+     * 其中 get(String) 被调用 108 次（getBoolean 28 / getInt 9 / getLong 2）。
      *
-     * ── 为什么不 hook 属性读取 ──
-     * baseVersionInOemInfo / custVersionInOemInfo 走 OemInfoUtil（读 oeminfo 分区），
-     * 根本不经过 SystemPropertiesEx。只 hook 属性会出现
-     * 「属性版说 10，oeminfo 版说 11」的自相矛盾，反而更容易被判定异常。
-     * 在 CommonRules 层面改，两套值一起变，口径一致。
+     * 在 get() 里把版本类属性的返回值换掉，效果是：
+     *   属性层 → DependCheckInfo 构造 → 请求体 → 界面显示
+     * 全部自动继承假值，不需要再去猜哪个类、哪个字段。
+     * 改一处，全链一致。
      *
-     * ── 为什么不碰 keyAttestation ──
-     * attestationChallenge 是 Build.getSerial()，固定值，输出恒定；
-     * TEE 签发的证书只声明「这台是 AAK-AN00」，不含系统版本号。
-     * 改版本不影响它，所以不要动，动了反而验证失败。
+     * ── 为什么只改白名单里的键 ──
+     * get() 承载 108 个调用点，无差别替换会把整个 App 搞崩。
+     * 只对 Const.SPOOF_PROP_PREFIX 开头、或名称里含 version 的键下手，
+     * 其余原样透传。
      *
      * ── 局限 ──
-     * 字段名是 R8 混淆前的原始名（CommonRules 没被混淆字段名），
-     * 但类路径和字段集只对 2.1.1.1（versionCode 205）成立，OUC 一升级即失效。
-     * 取不到的字段会跳过，不会让整个 hook 失败。
+     * SystemPropertiesEx 是 ROM 私有类，不同机型/ROM 可能不存在。
+     * 找不到就返回 false，不影响其它功能。
      */
     private boolean hookSpoofVersion(ClassLoader cl) {
         try {
-            Class<?> info = Class.forName(Const.CLS_DEPEND_CHECK_INFO, false, cl);
-            Class<?> mode = Class.forName(Const.CLS_CHECK_MODE, false, cl);
+            Class<?> sp = Class.forName(Const.CLS_SYS_PROP_EX, false, cl);
 
-            // 先把能解析到的字段全部解析好；一个都没有才放弃。
-            final Field[] targets = new Field[Const.SPOOF_FIELDS.length];
-            int found = 0;
-            for (int i = 0; i < Const.SPOOF_FIELDS.length; i++) {
-                try {
-                    Field f = info.getDeclaredField(Const.SPOOF_FIELDS[i]);
-                    if (f.getType() == String.class) {
-                        f.setAccessible(true);
-                        targets[found++] = f;
-                    }
-                } catch (NoSuchFieldException e) {
-                    log(Log.WARN, TAG, "DependCheckInfo 无字段 "
-                            + Const.SPOOF_FIELDS[i] + "，跳过");
-                }
-            }
-            if (found == 0) {
-                log(Log.ERROR, TAG, "DependCheckInfo 里一个版本字段都没解析到，放弃版本伪造");
-                return false;
-            }
-            final int count = found;
+            // 静态 get(String)，返回 String。
+            final Method get = sp.getDeclaredMethod("get", String.class);
+            get.setAccessible(true);
 
-            Constructor<?> ctor = info.getDeclaredConstructor(mode);
-            hook(ctor).intercept(chain -> {
-                Object r = chain.proceed();       // 先让原版把所有字段填满
-                try {
-                    Object self = chain.getThisObject();
-                    java.util.Map<String, String> want = readSpoofConfig();
-                    if (want.isEmpty()) {
-                        log(Log.WARN, TAG, "配置文件不存在或全被注释，按原版版本上报");
-                        return r;
-                    }
-                    for (int i = 0; i < count; i++) {
-                        Field f = targets[i];
-                        String v = want.get(f.getName());
-                        if (v == null || v.isEmpty()) {
-                            continue;
-                        }
-                        Object old = f.get(self);
-                        f.set(self, v);
-                        log(Log.INFO, TAG, "版本伪造 " + f.getName()
-                                + ": " + old + " -> " + v);
-                    }
-                } catch (Throwable t) {
-                    log(Log.ERROR, TAG, "改版本字段失败: " + t);
+            hook(get).intercept(chain -> {
+                Object keyObj = chain.getArg(0);
+                String key = keyObj instanceof String ? (String) keyObj : null;
+                Object real = chain.proceed();
+
+                if (key == null || !isVersionKey(key)) {
+                    return real;
                 }
-                return r;
+                java.util.Map<String, String> want = readSpoofConfig();
+                if (want.isEmpty()) {
+                    return real;
+                }
+                // 配置里可以按属性全名精确覆盖
+                String byKey = want.get(key);
+                if (byKey != null && !byKey.isEmpty()) {
+                    if (!byKey.equals(real)) {
+                        log(Log.INFO, TAG, "版本伪造 [" + key + "] "
+                                + real + " -> " + byKey);
+                    }
+                    return byKey;
+                }
+                return real;
             });
 
-            log(Log.INFO, TAG, "已挂 " + Const.CLS_DEPEND_CHECK_INFO
-                    + ".<init>，上报版本将改为上一代 OS（" + count + " 个字段）");
+            log(Log.INFO, TAG, "已挂 " + Const.CLS_SYS_PROP_EX
+                    + ".get()，版本类属性将按配置返回");
             return true;
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "挂 DependCheckInfo 构造失败: " + t);
+            log(Log.ERROR, TAG, "挂 SystemPropertiesEx.get 失败: " + t);
             return false;
         }
+    }
+
+    /**
+     * 判断某个属性键是不是版本类。
+     *
+     * 命中条件宁少勿多：get() 有 108 个调用点，误改会把 App 弄崩。
+     * 这里只认白名单前缀 + 明确的几个键。
+     */
+    private static boolean isVersionKey(String key) {
+        for (String p : Const.SPOOF_PROP_KEYS) {
+            if (key.equals(p)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -49,29 +49,33 @@ final class Const {
     static final String CLS_COMMON_RULES =
             "com.hihonor.android.hnouc.check.model.checkinfo.Request$ParamBuilder$CommonRules";
 
-    /**
-     * 真正的版本数据宿主，source: DependCheckInfo.java。
-     *
-     * 为什么最终改挂这里、而不是 ParamBuilder：
-     *   实测 Request$ParamBuilder.<init>(Request) 这个单参数构造器
-     *   在整个 APK 里没有任何 invoke 调用点 —— 是 R8 留下的死代码。
-     *   唯一被调用的是三参数 <init>(Request,String,String)，
-     *   而它只被 EnterpriseIdRequest（b.smali）使用，是企业版通道，
-     *   普通检查更新根本不走，所以挂它永远等不到执行。
-     *
-     *   DependCheckInfo 则只有一个构造器 <init>(l5.b)，
-     *   且 baseVersion / custVersion / cVersion / dVersion / hotaVersion
-     *   / vabGroupVersion / productBaseVersion 等全部版本字段
-     *   都在这个构造器里一次性赋值，是检查更新的必经之路。
-     */
-    static final String CLS_DEPEND_CHECK_INFO =
-            "com.hihonor.android.hnouc.check.model.checkinfo.DependCheckInfo";
+    /** 读取系统属性的唯一入口（ROM 私有类），全 APK 共 167 处引用。 */
+    static final String CLS_SYS_PROP_EX = "com.hihonor.android.os.SystemPropertiesEx";
 
     /**
-     * DependCheckInfo 构造器唯一的参数类型，smali 里写作 Ll5/b;。
-     * 也就是「检查模式」那个基类，正好和功能一 hook 的是同一个类。
+     * 允许被伪造的属性键白名单。
+     *
+     * 为什么用白名单而不是「名字里含 version 就改」：
+     *   get(String) 有 108 个调用点，误改一个非版本属性就可能让 App 崩掉。
+     *   这里只列真正承载系统版本的四个键，其余一律原样透传。
+     *
+     * 本机实测的真实值（2026-11-07，AAK-AN00 / OS11）：
+     *   ro.comp.hl.product_base_version    = AAK-LGRP1-CHN 11.0.0.110(SP7)
+     *   ro.comp.hl.product_cust_version    = AAK-AN00-CUST 11.0.0.110(C00)
+     *   ro.build.display.id                = AAK-AN00 11.0.0.110(SP7C00E110R102P2)
+     *   ro.comp.hl.product_preload_version = AAK-AN00-PRELOAD 11.0.0.2(C00R102)
+     *
+     * 配置文件里直接用属性全名当 key，例如：
+     *   ro.comp.hl.product_base_version=AAK-LGRP1-CHN 10.0.0.127(SP7)
      */
-    static final String CLS_CHECK_MODE = "l5.b";
+    static final String[] SPOOF_PROP_KEYS = {
+            "ro.comp.hl.product_base_version",
+            "ro.comp.hl.product_cust_version",
+            "ro.comp.hl.product_preload_version",
+            "ro.build.display.id",
+            "ro.build.version.incremental",
+            "ro.magic.cversion"
+    };
 
     /**
      * CommonRules 里允许被覆盖的版本字段（= 配置文件里的 key）。
