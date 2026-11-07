@@ -91,8 +91,9 @@ public class OtaHook extends XposedModule {
         }
         boolean s = hookCheckSum(cl);
         boolean v = hookSpoofVersion(cl);
+        boolean b = hookBuildFields(cl);
 
-        if (k || s || v) {
+        if (k || s || v || b) {
             hooked = true;
         }
     }
@@ -358,10 +359,89 @@ public class OtaHook extends XposedModule {
     }
 
     /**
+     * 伪造 android.os.Build 的静态版本字段。
+     *
+     * ── 为什么属性层改了界面还是不变 ──
+     * 实测：属性 hook 已命中 113 次并全部返回假值，但界面上那行
+     * 「当前版本」纹丝不动。原因是有第二条完全独立的读取路径：
+     *
+     *   og/x.z2() → r9/w1.m1() → lb/u.h(true) → lb/u.e(true)
+     *     → lb/u.d(true) 为空 → lb/u.b()
+     *     → PhonePropertyUtils.A()
+     *     → PhonePropertyUtils.f("DISPLAY")
+     *     → Class.forName("android.os.Build")
+     *         .getDeclaredField("DISPLAY").get(null)
+     *     → Build.DISPLAY 静态字段
+     *
+     * Build.DISPLAY 是进程启动时由 Zygote 从 ro.build.display.id
+     * 一次性读入的静态常量，之后再不读属性。所以无论属性层怎么改，
+     * 这个字段永远是启动那一刻的真值。
+     *
+     * ── 怎么改 ──
+     * 静态 final 字段无法直接 set，但可以用反射清掉 final 修饰再写。
+     * 在 onPackageReady（App 启动后）执行，此时字段已被初始化，
+     * 改完立即对所有后续读取生效。
+     *
+     * ── 为什么只改 DISPLAY ──
+     * 界面只用到 DISPLAY。FINGERPRINT 也被上报，但它的格式里
+     * 含有构建日期等大量信息，乱改更容易被判定异常，暂不碰。
+     */
+    private boolean hookBuildFields(ClassLoader cl) {
+        try {
+            java.util.Map<String, String> want = readSpoofConfig();
+            if (want.isEmpty()) {
+                log(Log.WARN, TAG, "无伪造配置，跳过 Build 静态字段改写");
+                return false;
+            }
+
+            Class<?> build = Class.forName("android.os.Build", false, cl);
+            boolean any = false;
+
+            String display = want.get("ro.build.display.id");
+            if (display != null && !display.isEmpty()) {
+                if (setStaticString(build, "DISPLAY", display)) {
+                    log(Log.INFO, TAG, "已改 Build.DISPLAY -> " + display);
+                    any = true;
+                }
+            }
+            return any;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "改 Build 静态字段失败: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 改写一个静态 String 字段，包括 static final 的。
+     *
+     * final 字段直接 set 会抛 IllegalAccessException，
+     * 所以要先把 modifiers 里的 FINAL 位清掉。
+     * 在 ART 上改 static final String 是允许的，字段本身仍可写。
+     */
+    private boolean setStaticString(Class<?> cls, String name, String value) {
+        try {
+            Field f = cls.getDeclaredField(name);
+            f.setAccessible(true);
+            try {
+                f.set(null, value);
+            } catch (IllegalAccessException e) {
+                // 清掉 final 修饰后再试一次
+                Field mods = Field.class.getDeclaredField("accessFlags");
+                mods.setAccessible(true);
+                mods.setInt(f, f.getModifiers() & ~java.lang.reflect.Modifier.FINAL);
+                f.set(null, value);
+            }
+            return true;
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "改静态字段 " + name + " 失败: " + t);
+            return false;
+        }
+    }
+
+    /**
      * 查某个属性键该不该被伪造，该则返回假值，不该返回 null。
      *
      * ── 为什么认 .real 后缀 ──
-     * 系统里每个版本属性都有一个 .real 孪生键（当前为空）。
      * OUC 的读取套路是：先读 xxx.real，为空才回落到 xxx。
      * 两边都要改，否则一旦某天 .real 被填值，假值就被绕过。
      */
