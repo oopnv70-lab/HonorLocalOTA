@@ -5,7 +5,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
 
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
@@ -34,6 +33,19 @@ import io.github.libxposed.api.XposedModuleInterface;
  *   onActivityResult（已在 smali 里逐个确认过），所以不能 getDeclaredMethod
  *   那个类上的方法——会 NoSuchMethodException。改为直接挂框架基类
  *   android.app.Activity 的实现，它一定存在，且是所有 Activity 的必经之路。
+ *
+ * 三、压掉「检查更新」的新版本提示（hookCheckSum）
+ *   拦 l5.b.p()，在原版算完之后把全部标志位改回 false。
+ *   这是独立的第二件事，和面板投放互不影响。
+ *
+ * ── 曾经有过的第四个功能：版本伪造 ──
+ *   曾实现过两套：hook SystemPropertiesEx.get(String,String) 改上报值、
+ *   反射改 Build.DISPLAY 改界面显示。两者都实测生效（日志 113+ 次命中、
+ *   界面版本串确实变了），但已验证对「能不能装上」毫无影响：
+ *   update_engine 安装时校验的是 oeminfo 分区（rmt_oeminfo_read，带完整性
+ *   哈希），完全不读系统属性。服务器按假版本回包，装的时候一读 oeminfo
+ *   版本对不上就直接拒，且改 oeminfo 要过完整性哈希、绕校验要解锁 BL。
+ *   既是死路，已整体移除，不再保留任何配置项或开关。
  */
 public class OtaHook extends XposedModule {
 
@@ -90,10 +102,8 @@ public class OtaHook extends XposedModule {
             log(Log.WARN, TAG, "本地更新入口未挂上，但继续尝试关闭检查更新");
         }
         boolean s = hookCheckSum(cl);
-        boolean v = hookSpoofVersion(cl);
-        boolean b = hookBuildFields(cl);
 
-        if (k || s || v || b) {
+        if (k || s) {
             hooked = true;
         }
     }
@@ -226,36 +236,11 @@ public class OtaHook extends XposedModule {
             hook(sum).intercept(chain -> {
                 Object r = chain.proceed();   // 先让原版把各标志算完
 
-                // ── 开关：block_check ──
-                // 配置里写 block_check=1 → 压掉「有新版本」标志（功能一生效）
-                // 不写或写 0            → 完全放行，标志保持服务器的原判
-                //
-                // 之前这里是「配置非空就放行」的隐式互斥，问题在于
-                // 只要写了任何伪造项，功能一就被悄悄关掉，用户无从得知。
-                // 现在改成显式开关，两个功能各自独立可控：
-                //
-                //   只想关检查更新：block_check=1，不写任何版本项
-                //   只想伪造版本：  写版本项，不写 block_check（或写 0）
-                //   两个都要：      两者都写（会互相抵消，见下方说明）
-                //
-                // 注意：同时开启会互相抵消。压掉标志后 UI 恒显示
-                // 「已是最新版本」，无论服务器回了什么，等于把功能二
-                // 的效果完全遮住。验证功能二时必须关掉这里。
-                java.util.Map<String, String> cfg = readSpoofConfig();
-                String sw = cfg.get(Const.KEY_BLOCK_CHECK);
-                boolean block = "1".equals(sw) || "true".equalsIgnoreCase(sw);
-                if (!block) {
-                    log(Log.INFO, TAG, "block_check 未开启，功能一放行（标志保持原判）");
-                    return r;
-                }
-
                 Object self = chain.getThisObject();
                 try {
                     for (Field f : fields) {
                         f.setBoolean(self, false);
                     }
-                    log(Log.INFO, TAG, "block_check 已开启，已压掉 " + fields.length
-                            + " 个新版本标志");
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "清理新版本标志失败: " + t);
                 }
@@ -263,7 +248,7 @@ public class OtaHook extends XposedModule {
             });
 
             log(Log.INFO, TAG, "已挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM
-                    + "()，由配置 block_check 控制是否恒为无新版本");
+                    + "()，检查更新将恒为无新版本");
             return true;
         } catch (Throwable t) {
             // 挂不上不影响本地更新功能，只是关不掉检查更新。
@@ -273,284 +258,6 @@ public class OtaHook extends XposedModule {
     }
 
     /**
-     * 在「读系统属性」这一层伪造版本号。
-     *
-     * ── 为什么改这里 ──
-     * 版本号在 OUC 里唯一的来源就是系统属性。整个 APK 里对属性读取
-     * 只有一处入口：com.hihonor.android.os.SystemPropertiesEx，
-     * 其中 get(String) 被调用 108 次（getBoolean 28 / getInt 9 / getLong 2）。
-     *
-     * 在 get() 里把版本类属性的返回值换掉，效果是：
-     *   属性层 → DependCheckInfo 构造 → 请求体 → 界面显示
-     * 全部自动继承假值，不需要再去猜哪个类、哪个字段。
-     * 改一处，全链一致。
-     *
-     * ── 为什么只改白名单里的键 ──
-     * get() 承载 108 个调用点，无差别替换会把整个 App 搞崩。
-     * 只对 Const.SPOOF_PROP_PREFIX 开头、或名称里含 version 的键下手，
-     * 其余原样透传。
-     *
-     * ── 局限 ──
-     * SystemPropertiesEx 是 ROM 私有类，不同机型/ROM 可能不存在。
-     * 找不到就返回 false，不影响其它功能。
-     */
-    private boolean hookSpoofVersion(ClassLoader cl) {
-        try {
-            Class<?> sp = Class.forName(Const.CLS_SYS_PROP_EX, false, cl);
-
-            // 两个重载都要挂：
-            //   get(String)        21 处调用
-            //   get(String,String) 87 处调用  ← 版本号读取全走这个
-            // 只挂前者会完全看不到效果，这是上一版的错误。
-            Method get2 = null;
-            try {
-                get2 = sp.getDeclaredMethod("get", String.class, String.class);
-                get2.setAccessible(true);
-            } catch (NoSuchMethodException ignored) {
-            }
-
-            Method get1 = null;
-            try {
-                get1 = sp.getDeclaredMethod("get", String.class);
-                get1.setAccessible(true);
-            } catch (NoSuchMethodException ignored) {
-            }
-
-            if (get1 == null && get2 == null) {
-                log(Log.ERROR, TAG, "SystemPropertiesEx 没有 get 方法，放弃版本伪造");
-                return false;
-            }
-
-            // ── 双参版：get(String key, String def) ──
-            // 命中白名单键时返回配置值；否则原样透传（含默认值语义）。
-            if (get2 != null) {
-                hook(get2).intercept(chain -> {
-                    Object keyObj = chain.getArg(0);
-                    String key = keyObj instanceof String ? (String) keyObj : null;
-                    if (key == null) {
-                        return chain.proceed();
-                    }
-                    String v = spoofedValue(key);
-                    if (v == null) {
-                        return chain.proceed();
-                    }
-                    Object real = chain.proceed();
-                    if (!v.equals(real)) {
-                        log(Log.INFO, TAG, "版本伪造 [" + key + "] " + real + " -> " + v);
-                    }
-                    return v;
-                });
-            }
-
-            // ── 单参版：get(String key) ──
-            if (get1 != null) {
-                hook(get1).intercept(chain -> {
-                    Object keyObj = chain.getArg(0);
-                    String key = keyObj instanceof String ? (String) keyObj : null;
-                    if (key == null) {
-                        return chain.proceed();
-                    }
-                    String v = spoofedValue(key);
-                    if (v == null) {
-                        return chain.proceed();
-                    }
-                    Object real = chain.proceed();
-                    if (!v.equals(real)) {
-                        log(Log.INFO, TAG, "版本伪造 [" + key + "] " + real + " -> " + v);
-                    }
-                    return v;
-                });
-            }
-
-            log(Log.INFO, TAG, "已挂 " + Const.CLS_SYS_PROP_EX
-                    + ".get(1参+2参)，版本类属性将按配置返回");
-            return true;
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "挂 SystemPropertiesEx.get 失败: " + t);
-            return false;
-        }
-    }
-
-    /**
-     * 伪造 android.os.Build 的静态版本字段。
-     *
-     * ── 为什么属性层改了界面还是不变 ──
-     * 实测：属性 hook 已命中 113 次并全部返回假值，但界面上那行
-     * 「当前版本」纹丝不动。原因是有第二条完全独立的读取路径：
-     *
-     *   og/x.z2() → r9/w1.m1() → lb/u.h(true) → lb/u.e(true)
-     *     → lb/u.d(true) 为空 → lb/u.b()
-     *     → PhonePropertyUtils.A()
-     *     → PhonePropertyUtils.f("DISPLAY")
-     *     → Class.forName("android.os.Build")
-     *         .getDeclaredField("DISPLAY").get(null)
-     *     → Build.DISPLAY 静态字段
-     *
-     * Build.DISPLAY 是进程启动时由 Zygote 从 ro.build.display.id
-     * 一次性读入的静态常量，之后再不读属性。所以无论属性层怎么改，
-     * 这个字段永远是启动那一刻的真值。
-     *
-     * ── 怎么改 ──
-     * 静态 final 字段无法直接 set，但可以用反射清掉 final 修饰再写。
-     * 在 onPackageReady（App 启动后）执行，此时字段已被初始化，
-     * 改完立即对所有后续读取生效。
-     *
-     * ── 为什么只改 DISPLAY ──
-     * 界面只用到 DISPLAY。FINGERPRINT 也被上报，但它的格式里
-     * 含有构建日期等大量信息，乱改更容易被判定异常，暂不碰。
-     */
-    private boolean hookBuildFields(ClassLoader cl) {
-        try {
-            java.util.Map<String, String> want = readSpoofConfig();
-            if (want.isEmpty()) {
-                log(Log.WARN, TAG, "无伪造配置，跳过 Build 静态字段改写");
-                return false;
-            }
-
-            Class<?> build = Class.forName("android.os.Build", false, cl);
-            boolean any = false;
-
-            String display = want.get("ro.build.display.id");
-            if (display != null && !display.isEmpty()) {
-                if (setStaticString(build, "DISPLAY", display)) {
-                    log(Log.INFO, TAG, "已改 Build.DISPLAY -> " + display);
-                    any = true;
-                }
-            }
-            return any;
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "改 Build 静态字段失败: " + t);
-            return false;
-        }
-    }
-
-    /**
-     * 改写一个静态 String 字段，包括 static final 的。
-     *
-     * final 字段直接 set 会抛 IllegalAccessException，
-     * 所以要先把 modifiers 里的 FINAL 位清掉。
-     * 在 ART 上改 static final String 是允许的，字段本身仍可写。
-     */
-    private boolean setStaticString(Class<?> cls, String name, String value) {
-        try {
-            Field f = cls.getDeclaredField(name);
-            f.setAccessible(true);
-            try {
-                f.set(null, value);
-            } catch (IllegalAccessException e) {
-                // 清掉 final 修饰后再试一次
-                Field mods = Field.class.getDeclaredField("accessFlags");
-                mods.setAccessible(true);
-                mods.setInt(f, f.getModifiers() & ~java.lang.reflect.Modifier.FINAL);
-                f.set(null, value);
-            }
-            return true;
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "改静态字段 " + name + " 失败: " + t);
-            return false;
-        }
-    }
-
-    /**
-     * 查某个属性键该不该被伪造，该则返回假值，不该返回 null。
-     *
-     * ── 为什么认 .real 后缀 ──
-     * OUC 的读取套路是：先读 xxx.real，为空才回落到 xxx。
-     * 两边都要改，否则一旦某天 .real 被填值，假值就被绕过。
-     */
-    private String spoofedValue(String key) {
-        if (!isVersionKey(key)) {
-            return null;
-        }
-        java.util.Map<String, String> want = readSpoofConfig();
-        if (want.isEmpty()) {
-            return null;
-        }
-        String v = want.get(key);
-        if (v != null && !v.isEmpty()) {
-            return v;
-        }
-        if (key.endsWith(".real")) {
-            v = want.get(key.substring(0, key.length() - 5));
-            if (v != null && !v.isEmpty()) {
-                return v;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 判断某个属性键是不是版本类。
-     *
-     * 命中条件宁少勿多：get() 有 108 个调用点，误改会把 App 弄崩。
-     * 这里只认白名单前缀 + 明确的几个键。
-     */
-    private static boolean isVersionKey(String key) {
-        if (key.endsWith(".real")) {
-            key = key.substring(0, key.length() - 5);
-        }
-        for (String p : Const.SPOOF_PROP_KEYS) {
-            if (key.equals(p)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 读版本伪造配置。
-     *
-     * 每次构造请求都重新读，所以改完文件立刻生效，不用重启 OUC。
-     * 文件格式：key=value，# 开头是注释，值两侧空白会被去掉。
-     * 读不到就返回空表，调用方按原版版本上报（即不伪造）。
-     */
-    private java.util.Map<String, String> readSpoofConfig() {
-        java.util.Map<String, String> out = new java.util.HashMap<>();
-        for (String path : Const.SPOOF_CONFIG_PATHS) {
-            java.io.BufferedReader br = null;
-            try {
-                java.io.File f = new java.io.File(path);
-                if (!f.exists() || !f.canRead()) {
-                    continue;
-                }
-                br = new java.io.BufferedReader(new java.io.InputStreamReader(
-                        new java.io.FileInputStream(f), "UTF-8"));
-                String line;
-                while ((line = br.readLine()) != null) {
-                    line = line.trim();
-                    if (line.isEmpty() || line.startsWith("#")) {
-                        continue;
-                    }
-                    int eq = line.indexOf('=');
-                    if (eq <= 0) {
-                        continue;
-                    }
-                    String k = line.substring(0, eq).trim();
-                    String v = line.substring(eq + 1).trim();
-                    if (!k.isEmpty() && !v.isEmpty()) {
-                        out.put(k, v);
-                    }
-                }
-                if (!out.isEmpty()) {
-                    log(Log.INFO, TAG, "读到伪造配置 " + path + "，共 " + out.size() + " 项");
-                    return out;
-                }
-            } catch (Throwable t) {
-                log(Log.WARN, TAG, "读配置失败 " + path + ": " + t);
-            } finally {
-                if (br != null) {
-                    try {
-                        br.close();
-                    } catch (Throwable ignored) {
-                        // 关不掉就算了，不影响主流程
-                    }
-                }
-            }
-        }
-        return out;
-    }
-
-    /** 在传入的 Activity 上盖一层全屏面板。已有面板就先拆掉，避免叠加。 */
     private void showPanel(Activity act) {
         PanelView old = sPanel;
         if (old != null) {
