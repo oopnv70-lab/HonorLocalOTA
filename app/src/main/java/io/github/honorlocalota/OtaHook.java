@@ -287,43 +287,35 @@ public class OtaHook extends XposedModule {
      */
     private boolean hookSpoofVersion(ClassLoader cl) {
         try {
-            Class<?> builder = Class.forName(Const.CLS_PARAM_BUILDER, false, cl);
-            Class<?> request = Class.forName(
-                    Const.CLS_REQUEST.replace('/', '.'), false, cl);
-            Class<?> rules = Class.forName(Const.CLS_COMMON_RULES, false, cl);
+            Class<?> info = Class.forName(Const.CLS_DEPEND_CHECK_INFO, false, cl);
+            Class<?> mode = Class.forName(Const.CLS_CHECK_MODE, false, cl);
 
             // 先把能解析到的字段全部解析好；一个都没有才放弃。
             final Field[] targets = new Field[Const.SPOOF_FIELDS.length];
             int found = 0;
             for (int i = 0; i < Const.SPOOF_FIELDS.length; i++) {
                 try {
-                    Field f = rules.getDeclaredField(Const.SPOOF_FIELDS[i]);
+                    Field f = info.getDeclaredField(Const.SPOOF_FIELDS[i]);
                     if (f.getType() == String.class) {
                         f.setAccessible(true);
                         targets[found++] = f;
                     }
                 } catch (NoSuchFieldException e) {
-                    log(Log.WARN, TAG, "CommonRules 无字段 " + Const.SPOOF_FIELDS[i] + "，跳过");
+                    log(Log.WARN, TAG, "DependCheckInfo 无字段 "
+                            + Const.SPOOF_FIELDS[i] + "，跳过");
                 }
             }
             if (found == 0) {
-                log(Log.ERROR, TAG, "CommonRules 里一个版本字段都没解析到，放弃版本伪造");
+                log(Log.ERROR, TAG, "DependCheckInfo 里一个版本字段都没解析到，放弃版本伪造");
                 return false;
             }
             final int count = found;
 
-            Constructor<?> ctor = builder.getDeclaredConstructor(request);
+            Constructor<?> ctor = info.getDeclaredConstructor(mode);
             hook(ctor).intercept(chain -> {
-                Object r = chain.proceed();       // 先让原版把 CommonRules 填满
+                Object r = chain.proceed();       // 先让原版把所有字段填满
                 try {
                     Object self = chain.getThisObject();
-                    Field crField = builder.getDeclaredField("commonRules");
-                    crField.setAccessible(true);
-                    Object cr = crField.get(self);
-                    if (cr == null) {
-                        log(Log.WARN, TAG, "commonRules 为 null，本次不改版本");
-                        return r;
-                    }
                     java.util.Map<String, String> want = readSpoofConfig();
                     if (want.isEmpty()) {
                         log(Log.WARN, TAG, "配置文件不存在或全被注释，按原版版本上报");
@@ -335,8 +327,8 @@ public class OtaHook extends XposedModule {
                         if (v == null || v.isEmpty()) {
                             continue;
                         }
-                        Object old = f.get(cr);
-                        f.set(cr, v);
+                        Object old = f.get(self);
+                        f.set(self, v);
                         log(Log.INFO, TAG, "版本伪造 " + f.getName()
                                 + ": " + old + " -> " + v);
                     }
@@ -346,11 +338,11 @@ public class OtaHook extends XposedModule {
                 return r;
             });
 
-            log(Log.INFO, TAG, "已挂 " + Const.CLS_PARAM_BUILDER
+            log(Log.INFO, TAG, "已挂 " + Const.CLS_DEPEND_CHECK_INFO
                     + ".<init>，上报版本将改为上一代 OS（" + count + " 个字段）");
             return true;
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "挂 ParamBuilder 构造失败: " + t);
+            log(Log.ERROR, TAG, "挂 DependCheckInfo 构造失败: " + t);
             return false;
         }
     }

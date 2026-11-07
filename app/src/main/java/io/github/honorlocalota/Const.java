@@ -50,6 +50,30 @@ final class Const {
             "com.hihonor.android.hnouc.check.model.checkinfo.Request$ParamBuilder$CommonRules";
 
     /**
+     * 真正的版本数据宿主，source: DependCheckInfo.java。
+     *
+     * 为什么最终改挂这里、而不是 ParamBuilder：
+     *   实测 Request$ParamBuilder.<init>(Request) 这个单参数构造器
+     *   在整个 APK 里没有任何 invoke 调用点 —— 是 R8 留下的死代码。
+     *   唯一被调用的是三参数 <init>(Request,String,String)，
+     *   而它只被 EnterpriseIdRequest（b.smali）使用，是企业版通道，
+     *   普通检查更新根本不走，所以挂它永远等不到执行。
+     *
+     *   DependCheckInfo 则只有一个构造器 <init>(l5.b)，
+     *   且 baseVersion / custVersion / cVersion / dVersion / hotaVersion
+     *   / vabGroupVersion / productBaseVersion 等全部版本字段
+     *   都在这个构造器里一次性赋值，是检查更新的必经之路。
+     */
+    static final String CLS_DEPEND_CHECK_INFO =
+            "com.hihonor.android.hnouc.check.model.checkinfo.DependCheckInfo";
+
+    /**
+     * DependCheckInfo 构造器唯一的参数类型，smali 里写作 Ll5/b;。
+     * 也就是「检查模式」那个基类，正好和功能一 hook 的是同一个类。
+     */
+    static final String CLS_CHECK_MODE = "l5.b";
+
+    /**
      * CommonRules 里允许被覆盖的版本字段（= 配置文件里的 key）。
      *
      * 实测本机原值为：
