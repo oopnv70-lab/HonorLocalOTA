@@ -296,8 +296,6 @@ public class OtaHook extends XposedModule {
                 log(Log.ERROR, TAG, "CommonRules 里一个版本字段都没解析到，放弃版本伪造");
                 return false;
             }
-            final java.util.regex.Pattern from =
-                    java.util.regex.Pattern.compile(Const.SPOOF_FROM);
             final int count = found;
 
             Constructor<?> ctor = builder.getDeclaredConstructor(request);
@@ -312,19 +310,21 @@ public class OtaHook extends XposedModule {
                         log(Log.WARN, TAG, "commonRules 为 null，本次不改版本");
                         return r;
                     }
+                    java.util.Map<String, String> want = readSpoofConfig();
+                    if (want.isEmpty()) {
+                        log(Log.WARN, TAG, "配置文件不存在或全被注释，按原版版本上报");
+                        return r;
+                    }
                     for (int i = 0; i < count; i++) {
                         Field f = targets[i];
-                        Object v = f.get(cr);
-                        if (!(v instanceof String)) {
+                        String v = want.get(f.getName());
+                        if (v == null || v.isEmpty()) {
                             continue;
                         }
-                        String s = (String) v;
-                        String n = from.matcher(s).replaceAll(Const.SPOOF_TO);
-                        if (!n.equals(s)) {
-                            f.set(cr, n);
-                            log(Log.INFO, TAG, "版本伪造 " + f.getName()
-                                    + ": " + s + " -> " + n);
-                        }
+                        Object old = f.get(cr);
+                        f.set(cr, v);
+                        log(Log.INFO, TAG, "版本伪造 " + f.getName()
+                                + ": " + old + " -> " + v);
                     }
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "改版本字段失败: " + t);
@@ -339,6 +339,59 @@ public class OtaHook extends XposedModule {
             log(Log.ERROR, TAG, "挂 ParamBuilder 构造失败: " + t);
             return false;
         }
+    }
+
+    /**
+     * 读版本伪造配置。
+     *
+     * 每次构造请求都重新读，所以改完文件立刻生效，不用重启 OUC。
+     * 文件格式：key=value，# 开头是注释，值两侧空白会被去掉。
+     * 读不到就返回空表，调用方按原版版本上报（即不伪造）。
+     */
+    private java.util.Map<String, String> readSpoofConfig() {
+        java.util.Map<String, String> out = new java.util.HashMap<>();
+        for (String path : Const.SPOOF_CONFIG_PATHS) {
+            java.io.BufferedReader br = null;
+            try {
+                java.io.File f = new java.io.File(path);
+                if (!f.exists() || !f.canRead()) {
+                    continue;
+                }
+                br = new java.io.BufferedReader(new java.io.InputStreamReader(
+                        new java.io.FileInputStream(f), "UTF-8"));
+                String line;
+                while ((line = br.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty() || line.startsWith("#")) {
+                        continue;
+                    }
+                    int eq = line.indexOf('=');
+                    if (eq <= 0) {
+                        continue;
+                    }
+                    String k = line.substring(0, eq).trim();
+                    String v = line.substring(eq + 1).trim();
+                    if (!k.isEmpty() && !v.isEmpty()) {
+                        out.put(k, v);
+                    }
+                }
+                if (!out.isEmpty()) {
+                    log(Log.INFO, TAG, "读到伪造配置 " + path + "，共 " + out.size() + " 项");
+                    return out;
+                }
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "读配置失败 " + path + ": " + t);
+            } finally {
+                if (br != null) {
+                    try {
+                        br.close();
+                    } catch (Throwable ignored) {
+                        // 关不掉就算了，不影响主流程
+                    }
+                }
+            }
+        }
+        return out;
     }
 
     /** 在传入的 Activity 上盖一层全屏面板。已有面板就先拆掉，避免叠加。 */

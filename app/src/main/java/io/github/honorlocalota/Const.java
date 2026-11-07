@@ -50,13 +50,13 @@ final class Const {
             "com.hihonor.android.hnouc.check.model.checkinfo.Request$ParamBuilder$CommonRules";
 
     /**
-     * CommonRules 里要改的版本字段。
+     * CommonRules 里允许被覆盖的版本字段（= 配置文件里的 key）。
      *
-     * 实测本机上报值为：
+     * 实测本机原值为：
      *   productBaseVersion = AAK-LGRP1-CHN 11.0.0.110(SP7)
-     *   cVersion           = AAK-AN00-CUST 11.0.0.110(C00)   ← 由 C00 拼出来的
+     *   cVersion           = AAK-AN00-CUST 11.0.0.110(C00)
      *   dVersion           = D000
-     * 取不到的字段会跳过并打日志，不会整体失败——混淆名随版本变，宁可少改也要能挂上。
+     * 这些只是「允许改的名单」，具体填什么由配置文件决定。
      */
     static final String[] SPOOF_FIELDS = {
             "productBaseVersion", "cVersion", "dVersion", "deviceDisplayVersion",
@@ -64,13 +64,35 @@ final class Const {
     };
 
     /**
-     * 把 " 11.0.0." 改成 " 10.0.0."，只动空格后面的版本段。
+     * 配置文件按顺序查找，第一个能读到的生效。
      *
-     * 用 \s 而不是空串，是为了不误伤 AAK-LGRP1-CHN 里的数字；
-     * 替换串用 ${1} 显式收尾，否则 "$110" 会被当成第 110 个捕获组。
+     * 放两个位置的原因：
+     *   1) 第一条是 OUC 自己的外部私有目录，OUC 一定有权限，
+     *      而且你从文件管理器就能改，不需要 root。
+     *   2) 第二条是本地更新用的那个 0777 目录，作为兜底。
+     *
+     * 格式是 key=value，# 开头是注释，值为空的项表示「这个字段不改」。
+     * 每次构造请求都重新读文件，所以改完立刻生效，不用重启 OUC。
      */
-    static final String SPOOF_FROM = "(\\s)11\\.0\\.0\\.";
-    static final String SPOOF_TO = "${1}10.0.0.";
+    static final String[] SPOOF_CONFIG_PATHS = {
+            "/storage/emulated/0/Android/data/com.hihonor.ouc/files/version_spoof.conf",
+            "/data/local_ota/version_spoof.conf"
+    };
+
+    /** 配置文件模板内容，面板/文档里可以直接引用。 */
+    static final String SPOOF_TEMPLATE =
+            "# 只写你想改的字段，没写或用 # 注释掉的保持原值。\n"
+            + "# 每次点「检查更新」都会重新读本文件，改完即生效，不用重启。\n"
+            + "# 值为空 = 不改该字段。\n"
+            + "\n"
+            + "# 系统基带版本串，服务器靠这个判断你停在哪个大版本\n"
+            + "# productBaseVersion=AAK-LGRP1-CHN 10.0.0.150(SP2)\n"
+            + "\n"
+            + "# 定制版本串\n"
+            + "# cVersion=AAK-AN00-CUST 10.0.0.150(C00)\n"
+            + "\n"
+            + "# 其余可改字段：dVersion / deviceDisplayVersion / hotaVersion\n"
+            + "# vabGroupVersion / verGroup / vendorCota\n";
 
     private Const() {
     }
