@@ -257,7 +257,7 @@ public class OtaHook extends XposedModule {
         }
     }
 
-    /**
+    /** 把面板挂到承载它的 Activity 上，同一时刻只保留一个。 */
     private void showPanel(Activity act) {
         PanelView old = sPanel;
         if (old != null) {
