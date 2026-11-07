@@ -25,29 +25,52 @@ final class SwitchStore {
     private SwitchStore() {
     }
 
-    /** 读开关。任何异常都返回默认值。 */
+    /** 读「屏蔽系统更新」开关。任何异常都返回默认值（true）。 */
     static boolean isBlockUpdate() {
-        String v = readKey(Const.KEY_BLOCK_UPDATE);
-        if (v == null) {
-            return Const.DEFAULT_BLOCK_UPDATE;
-        }
-        v = v.trim().toLowerCase();
-        if ("0".equals(v) || "false".equals(v) || "off".equals(v) || "no".equals(v)) {
-            return false;
-        }
-        if ("1".equals(v) || "true".equals(v) || "on".equals(v) || "yes".equals(v)) {
-            return true;
-        }
-        return Const.DEFAULT_BLOCK_UPDATE;
+        return readBool(Const.KEY_BLOCK_UPDATE, Const.DEFAULT_BLOCK_UPDATE);
     }
 
     /**
-     * 写开关。
+     * 写「屏蔽系统更新」开关。
      *
      * @return null 表示成功，否则是错误描述
      */
     static String setBlockUpdate(boolean on) {
         return writeKey(Const.KEY_BLOCK_UPDATE, on ? "true" : "false");
+    }
+
+    // ─────────────── 全量包 ───────────────
+
+    /** 读「强制请求全量包」开关。任何异常都返回默认值（false）。 */
+    static boolean isForceFullPackage() {
+        return readBool(Const.KEY_FORCE_FULL_PACKAGE, Const.DEFAULT_FORCE_FULL_PACKAGE);
+    }
+
+    /**
+     * 写「强制请求全量包」开关。
+     *
+     * @return null 表示成功，否则是错误描述
+     */
+    static String setForceFullPackage(boolean on) {
+        return writeKey(Const.KEY_FORCE_FULL_PACKAGE, on ? "true" : "false");
+    }
+
+    /**
+     * 「屏蔽更新当前是否真的生效」。
+     *
+     * 两个开关是互斥的：要拿全量包，就不能同时把更新提示压成
+     * 「已是最新版本」——那用户根本看不到服务器回来的新版本，
+     * 也就没有入口去点它。
+     *
+     * ── 为什么用「读时判定」而不是「打开全量包时自动关掉屏蔽」──
+     *   自动关掉需要额外记住「这个 false 是程序替你关的」，
+     *   否则用户关掉全量包之后没法恢复原状态，得再手动开一次。
+     *   而且两个键写同一个文件，中间存在改写到一半的窗口。
+     *   这里只是一个纯函数，无状态、无竞态，
+     *   界面那边也不用改开关本身，只在旁边显示一句「已被覆盖」。
+     */
+    static boolean isBlockEffective() {
+        return isBlockUpdate() && !isForceFullPackage();
     }
 
     /** 开关文件当前是否存在。界面上用来区分「从没设置过」和「用户设过」。 */
@@ -60,6 +83,27 @@ final class SwitchStore {
     }
 
     // ─────────────── 底层读写 ───────────────
+
+    /**
+     * 读一个布尔键，认 true/1/on/yes 与 false/0/off/no（大小写不敏感）。
+     *
+     * 键缺失或值不认识时返回 def，不抛异常。
+     * 两个开关共用这一份，避免各写一遍解析逻辑导致行为不一致。
+     */
+    private static boolean readBool(String key, boolean def) {
+        String v = readKey(key);
+        if (v == null) {
+            return def;
+        }
+        v = v.trim().toLowerCase();
+        if ("0".equals(v) || "false".equals(v) || "off".equals(v) || "no".equals(v)) {
+            return false;
+        }
+        if ("1".equals(v) || "true".equals(v) || "on".equals(v) || "yes".equals(v)) {
+            return true;
+        }
+        return def;
+    }
 
     /**
      * 从开关文件里取一个键。

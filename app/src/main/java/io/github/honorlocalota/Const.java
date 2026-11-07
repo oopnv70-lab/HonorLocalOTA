@@ -58,6 +58,36 @@ final class Const {
     /** 开关默认值：默认开启屏蔽。 */
     static final boolean DEFAULT_BLOCK_UPDATE = true;
 
+    // ─────────────── 全量包 ───────────────
+
+    /**
+     * 「强制请求全量包」的开关键名。
+     *
+     * 默认关闭（false）。
+     */
+    static final String KEY_FORCE_FULL_PACKAGE = "force_full_package";
+
+    static final boolean DEFAULT_FORCE_FULL_PACKAGE = false;
+
+    /**
+     * 决定「请求全量包还是增量包」的方法。
+     *
+     * source: r9/w1.java 的 getPackageTypeForChecking(...)
+     * 该方法返回 "recovery"（全量）或 "upgrade"（增量），
+     * 结果被写进 DependCheckInfo.hotaPackageType，再随请求发给服务器。
+     * 日志原文直接印证了语义：
+     *   "getPackageTypeForChecking readyToUpgradeIncrementPackage true,
+     *    return INCREMENT_PACKAGE"
+     *   "... false, return RECOVERY"
+     */
+    static final String CLS_PKG_TYPE = "r9.w1";
+
+    /** 包类型判定方法，签名 ()Ljava/lang/String;，private static。 */
+    static final String MTH_PKG_TYPE = "x2";
+
+    /** 全量包。 */
+    static final String PKG_TYPE_RECOVERY = "recovery";
+
     private Const() {
     }
 }

@@ -38,7 +38,13 @@ import io.github.libxposed.api.XposedModuleInterface;
  *   拦 l5.b.p()，在原版算完之后把全部标志位改回 false。
  *   这是独立的第二件事，和面板投放互不影响。
  *
- * ── 曾经有过的第四个功能：版本伪造 ──
+ * 四、强制向服务器要全量包（hookPackageType）
+ *   拦 r9.w1.x2()，返回 "recovery"。x2() 的返回值在
+ *   DependCheckInfo 构造时写进 hotaPackageType，随请求发给服务器，
+ *   决定服务器回全量包还是增量包。这一条替代了社区里
+ *   "反复清数据卡全量包"的试错做法，原因见 hookPackageType 的注释。
+ *
+ * ── 已经删除的功能：版本伪造 ──
  *   曾实现过两套：hook SystemPropertiesEx.get(String,String) 改上报值、
  *   反射改 Build.DISPLAY 改界面显示。两者都实测生效（日志 113+ 次命中、
  *   界面版本串确实变了），但已验证对「能不能装上」毫无影响：
@@ -92,9 +98,10 @@ public class OtaHook extends XposedModule {
         ClassLoader cl = param.getClassLoader();
         log(Log.INFO, TAG, "onPackageReady: " + param.getPackageName());
 
-        // 两件事互相独立，不能因为一件挂不上就放弃另一件：
+        // 三件事互相独立，不能因为一件挂不上就放弃其余：
         //   hookK/hookActivityResult → 本地更新入口（面板投放）
         //   hookCheckSum             → 关掉「检查更新」的新版本提示
+        //   hookPackageType          → 强制向服务器要全量包
         boolean k = hookK(cl);
         if (k) {
             hookActivityResult();
@@ -102,8 +109,9 @@ public class OtaHook extends XposedModule {
             log(Log.WARN, TAG, "本地更新入口未挂上，但继续尝试关闭检查更新");
         }
         boolean s = hookCheckSum(cl);
+        boolean f = hookPackageType(cl);
 
-        if (k || s) {
+        if (k || s || f) {
             hooked = true;
         }
     }
@@ -244,8 +252,11 @@ public class OtaHook extends XposedModule {
                 // 每次调用都重新读开关文件，不缓存：
                 // 用户在设置的 App 里关掉屏蔽后，OUC 不需要重启就能回到真实行为。
                 // 一次读文件的开销远小于它本身的网络请求，不值得为它做缓存失效逻辑。
-                if (!SwitchStore.isBlockUpdate()) {
-                    return r;   // 用户关掉了屏蔽，原样放行
+                // 这里用的是 isBlockEffective() 而不是 isBlockUpdate()：
+                // 「强制全量包」开着时屏蔽自动失效，否则用户看不到更新提示，
+                // 也就没有入口去点那个全量包。详见 SwitchStore.isBlockEffective()。
+                if (!SwitchStore.isBlockEffective()) {
+                    return r;   // 屏蔽没生效（用户关了，或被全量包覆盖），原样放行
                 }
 
                 Object self = chain.getThisObject();
@@ -265,6 +276,64 @@ public class OtaHook extends XposedModule {
         } catch (Throwable t) {
             // 挂不上不影响本地更新功能，只是关不掉检查更新。
             log(Log.ERROR, TAG, "挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM + " 失败: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 挂 r9.w1.x2()，让 OUC 向服务器请求全量包而不是增量包。
+     *
+     * ── 判定链（全部来自 smali，不是推断）──
+     *   DependCheckInfo 构造函数第 589 行：
+     *       iput-object v0, p0, ...->hotaPackageType
+     *       invoke-static {}, Lr9/w1;->x2()Ljava/lang/String;
+     *   x2() 返回 "recovery"（全量）或 "upgrade"（增量），
+     *   日志原文直接印证：
+     *       "getPackageTypeForChecking readyToUpgradeIncrementPackage true,
+     *        return INCREMENT_PACKAGE"
+     *       "... false, return RECOVERY"
+     *
+     *   x2() 内部是 b7(isVeritySupport, isVerifyFailByOvMode)，
+     *   返回 true ⇔ 允许请求增量包。b7 的门控为 K5()（读属性
+     *   honor.check_root.hotapermit）、q4()（读 ro.config.data_preinstalled）、
+     *   n4()、X4()，任意一个成立就返回 false → 请求全量。
+     *   这也是社区里"反复清数据能卡出全量包"的原理：清数据重置了
+     *   n4()/X4() 依赖的本地状态。
+     *
+     * ── 为什么挂 x2() 而不是 b7() ──
+     *   b7 更底层，会影响它的全部调用点；x2() 只服务「检查更新请求哪个包」，
+     *   一个 private static 方法、一行返回，是最小改动面。
+     *
+     * ── 局限 ──
+     *   只决定"服务器回哪种包"，不保证"一定能装"。目标版本高于当前能装；
+     *   降级仍会被 update_engine 对 oeminfo 的校验拦下，那条路要动分区，
+     *   本模块不碰。
+     */
+    private boolean hookPackageType(ClassLoader cl) {
+        try {
+            Class<?> w1 = Class.forName(Const.CLS_PKG_TYPE, false, cl);
+            Method m = w1.getDeclaredMethod(Const.MTH_PKG_TYPE);
+            // private static：必须开放访问，否则 hook 时取不到方法体
+            m.setAccessible(true);
+
+            hook(m).intercept(chain -> {
+                // 开关关着就走原版逻辑，一行不多做。
+                // 每次重读文件，用户在设置里改完立刻生效，不需要重启 OUC。
+                if (!SwitchStore.isForceFullPackage()) {
+                    return chain.proceed();
+                }
+                // 恒定请求全量包。注意这里不 proceed：
+                // 原版返回值是 "upgrade" 时我们要覆盖它，直接给字符串更省事，
+                // 也避开 proceedWith 对返回类型的反射校验。
+                log(Log.INFO, TAG, "强制全量包：x2() 返回 " + Const.PKG_TYPE_RECOVERY);
+                return Const.PKG_TYPE_RECOVERY;
+            });
+
+            log(Log.INFO, TAG, "已挂 " + Const.CLS_PKG_TYPE + "." + Const.MTH_PKG_TYPE + "()");
+            return true;
+        } catch (Throwable t) {
+            // 挂不上只是没有全量包功能，不影响已经工作的屏蔽与本地更新。
+            log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + "." + Const.MTH_PKG_TYPE + " 失败: " + t);
             return false;
         }
     }

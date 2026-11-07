@@ -2,6 +2,7 @@ package io.github.honorlocalota;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -12,25 +13,40 @@ import android.widget.Toast;
 /**
  * 桌面入口：模块设置页。
  *
- * 跑在模块自己的进程里，不参与 OUC 的 hook。
- * 它只做一件事：读写「屏蔽系统更新」这一个开关。
+ * 跑在模块自己的进程里，不参与 OUC 的 hook。它只做一件事：
+ * 读写两个开关——「屏蔽系统更新」与「强制全量包」。
+ *
+ * ── 两个开关的关系 ──
+ *   互斥，但不是靠「互相改写」实现的。
+ *   打开全量包时，屏蔽开关本身不会被程序拨掉，而是它的判定变成
+ *   SwitchStore.isBlockEffective() = 屏蔽 && !全量包，界面在旁边
+ *   标一句「已被覆盖」。这样没有状态需要回滚，也不会出现
+ *   两个键写同一文件的中途态。理由详见 SwitchStore.isBlockEffective()。
  *
  * ── 为什么不需要任何权限、也不需要 root ──
  *   开关文件在 /data/local_ota/（权限 0777）。
  *   本模块 uid 实测可直接写，不需要 su。
  *   详见 Const.SWITCH_FILE 的注释。
  *
- * ── 为什么还保留「本地更新」的说明而没有额外开关 ──
+ * ── 为什么「本地更新」只有说明没有开关 ──
  *   面板（PanelView）是挂到 OUC 界面上的，只要 hook 挂上就存在，
  *   没有需要用户配置的东西。它的状态由 LSPosed 是否启用模块决定，
- *   在那之前加一个本模块自己的开关只会造成「开着但没生效」的困惑。
+ *   在这之前加一个本模块自己的开关只会造成「开着但没生效」的困惑。
  */
 public class SettingsActivity extends Activity {
 
     private Theme theme;
+
     private SwitchButton blockSwitch;
+    private SwitchButton fullSwitch;
+
+    /** 屏蔽开关下方的状态行（已开启 / 已关闭 / 被全量包覆盖）。 */
+    private TextView blockHint;
+
+    /** 全量包开关下方的状态行。 */
+    private TextView fullHint;
+
     private TextView statusLine;
-    private TextView switchHint;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,10 +70,13 @@ public class SettingsActivity extends Activity {
         // ── 卡片一：屏蔽系统更新 ──
         page.addView(buildBlockCard(), theme.gaps(this, 24, 0));
 
-        // ── 卡片二：本地更新 ──
+        // ── 卡片二：强制全量包 ──
+        page.addView(buildFullCard(), theme.gaps(this, 14, 0));
+
+        // ── 卡片三：本地更新 ──
         page.addView(buildLocalCard(), theme.gaps(this, 14, 0));
 
-        // ── 卡片三：状态 ──
+        // ── 卡片四：状态 ──
         page.addView(buildStatusCard(), theme.gaps(this, 14, 0));
 
         ScrollView sv = new ScrollView(this);
@@ -86,32 +105,10 @@ public class SettingsActivity extends Activity {
 
         card.addView(theme.sectionTitle(this, "更新提示"), theme.matchWrap());
 
-        // 标题 + 开关同一行
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-
-        LinearLayout textCol = new LinearLayout(this);
-        textCol.setOrientation(LinearLayout.VERTICAL);
-
-        TextView name = theme.text(this, "屏蔽系统更新", 17, theme.onSurface);
-        name.setTypeface(android.graphics.Typeface.create(
-                "sans-serif-medium", android.graphics.Typeface.NORMAL));
-        textCol.addView(name, theme.matchWrap());
-
-        switchHint = theme.text(this, "", 12, theme.primary);
-        switchHint.setPadding(0, Theme.dp(this, 4), 0, 0);
-        textCol.addView(switchHint, theme.matchWrap());
-
-        LinearLayout.LayoutParams colLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        row.addView(textCol, colLp);
-
+        blockHint = theme.text(this, "", 12, theme.primary);
         blockSwitch = new SwitchButton(this);
-        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
-                Theme.dp(this, 52), Theme.dp(this, 32));
-        row.addView(blockSwitch, swLp);
 
+        LinearLayout row = switchRow("屏蔽系统更新", blockHint, blockSwitch);
         card.addView(row, theme.gaps(this, 14, 0));
 
         TextView desc = theme.text(this,
@@ -122,8 +119,7 @@ public class SettingsActivity extends Activity {
         card.addView(desc, theme.gaps(this, 14, 0));
 
         // 让整张卡片都能点（点文字也能切）
-        ViewGroup clickable = card;
-        clickable.setOnClickListener(v -> blockSwitch.performClick());
+        card.setOnClickListener(v -> blockSwitch.performClick());
 
         blockSwitch.setOnCheckedChangeListener((v, checked, fromUser) -> {
             if (!fromUser) {
@@ -132,7 +128,8 @@ public class SettingsActivity extends Activity {
             String err = SwitchStore.setBlockUpdate(checked);
             if (err != null) {
                 toast("保存失败：" + err);
-                // 存不进去就把 UI 拨回去，避免显示的和实际不一致
+                // 存不进去就把 UI 拨回去，避免显示的和实际不一致。
+                // 回拨不触发保存：fromUser 为 false。
                 v.setChecked(!checked);
                 return;
             }
@@ -140,6 +137,87 @@ public class SettingsActivity extends Activity {
         });
 
         return card;
+    }
+
+    // ─────────────── 卡片：强制全量包 ───────────────
+
+    private LinearLayout buildFullCard() {
+        LinearLayout card = theme.card(this);
+
+        card.addView(theme.sectionTitle(this, "更新包类型"), theme.matchWrap());
+
+        fullHint = theme.text(this, "", 12, theme.onSurfaceVariant);
+        fullSwitch = new SwitchButton(this);
+
+        LinearLayout row = switchRow("强制全量包", fullHint, fullSwitch);
+        card.addView(row, theme.gaps(this, 14, 0));
+
+        TextView desc = theme.text(this,
+                "开启后，检查更新会直接向服务器要完整包，而不是增量包。"
+                        + "这替代了「反复清除应用数据碰运气」的土办法：它是确定性的，"
+                        + "清数据只是恰好改变了全量/增量的判定条件。",
+                13, theme.onSurfaceVariant);
+        desc.setLineSpacing(Theme.dp(this, 3), 1f);
+        card.addView(desc, theme.gaps(this, 14, 0));
+
+        TextView note = theme.text(this,
+                "注意：此开关只决定服务器回哪种包，不保证一定能装。"
+                        + "目标版本高于当前版本可以正常安装；降级仍会被系统安装引擎拒绝。",
+                12, theme.onSurfaceVariant);
+        note.setLineSpacing(Theme.dp(this, 3), 1f);
+        card.addView(note, theme.gaps(this, 10, 0));
+
+        card.setOnClickListener(v -> fullSwitch.performClick());
+
+        fullSwitch.setOnCheckedChangeListener((v, checked, fromUser) -> {
+            if (!fromUser) {
+                return;
+            }
+            String err = SwitchStore.setForceFullPackage(checked);
+            if (err != null) {
+                toast("保存失败：" + err);
+                v.setChecked(!checked);
+                return;
+            }
+            refresh();
+        });
+
+        return card;
+    }
+
+    // ─────────────── 复用：标题 + 提示 + 开关的一行 ───────────────
+
+    /**
+     * 左列是标题和提示文字（占满剩余宽度），右列是开关。
+     *
+     * 抽出来是为了两个开关长得完全一样，
+     * 否则以后改一处样式另一处会漏改。
+     */
+    private LinearLayout switchRow(String name, TextView hint, SwitchButton sw) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView t = theme.text(this, name, 17, theme.onSurface);
+        t.setTypeface(android.graphics.Typeface.create(
+                "sans-serif-medium", android.graphics.Typeface.NORMAL));
+        textCol.addView(t, theme.matchWrap());
+
+        hint.setPadding(0, Theme.dp(this, 4), 0, 0);
+        textCol.addView(hint, theme.matchWrap());
+
+        LinearLayout.LayoutParams colLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        row.addView(textCol, colLp);
+
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
+                Theme.dp(this, 52), Theme.dp(this, 32));
+        row.addView(sw, swLp);
+
+        return row;
     }
 
     // ─────────────── 卡片：本地更新 ───────────────
@@ -182,23 +260,42 @@ public class SettingsActivity extends Activity {
 
     // ─────────────── 状态刷新 ───────────────
 
+    /**
+     * 从开关文件重读并刷新界面。
+     *
+     * 不用 setChecked 的监听做状态同步，而是每次统一从这里刷：
+     * 两个开关互相影响（全量包会覆盖屏蔽），
+     * 只在一处计算才能保证界面显示与实际判定一致。
+     */
     private void refresh() {
-        boolean on = SwitchStore.isBlockUpdate();
-        blockSwitch.setChecked(on);
+        boolean block = SwitchStore.isBlockUpdate();
+        boolean full = SwitchStore.isForceFullPackage();
 
-        boolean hasFile = SwitchStore.exists();
-        if (on) {
-            switchHint.setText("已开启");
-            switchHint.setTextColor(theme.primary);
+        blockSwitch.setChecked(block);
+        fullSwitch.setChecked(full);
+
+        // 屏蔽开关的状态行：三态。被覆盖时要显式说出来，
+        // 否则用户会以为「我明明开着屏蔽，怎么还有更新提示」。
+        if (!block) {
+            blockHint.setText("已关闭");
+            blockHint.setTextColor(theme.onSurfaceVariant);
+        } else if (full) {
+            blockHint.setText("已被「强制全量包」覆盖，当前不生效");
+            blockHint.setTextColor(theme.onSurfaceVariant);
         } else {
-            switchHint.setText("已关闭");
-            switchHint.setTextColor(theme.onSurfaceVariant);
+            blockHint.setText("已开启");
+            blockHint.setTextColor(theme.primary);
         }
 
+        fullHint.setText(full ? "已开启，检查更新时请求完整包" : "已关闭，按系统原逻辑判定");
+        fullHint.setTextColor(full ? theme.primary : theme.onSurfaceVariant);
+
         StringBuilder sb = new StringBuilder();
-        sb.append("开关 ").append(hasFile ? "已写入配置文件" : "尚未写入，按默认值生效").append('\n');
-        sb.append("当前值 ").append(Const.KEY_BLOCK_UPDATE).append('=')
-                .append(on).append('\n');
+        sb.append("配置 ").append(SwitchStore.exists() ? "已写入文件" : "尚未写入，按默认值生效")
+                .append('\n');
+        sb.append(Const.KEY_BLOCK_UPDATE).append('=').append(block)
+                .append("（实际生效 ").append(SwitchStore.isBlockEffective()).append("）\n");
+        sb.append(Const.KEY_FORCE_FULL_PACKAGE).append('=').append(full).append('\n');
         sb.append("文件 ").append(Const.SWITCH_FILE).append('\n');
         sb.append("安装包目录 ").append(Const.DST_DIR);
         statusLine.setText(sb.toString());
