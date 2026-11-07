@@ -84,7 +84,16 @@ final class Const {
      */
     static final String[] SPOOF_FIELDS = {
             "productBaseVersion", "cVersion", "dVersion", "deviceDisplayVersion",
-            "hotaVersion", "vabGroupVersion", "verGroup", "vendorCota"
+            "hotaVersion", "vabGroupVersion", "verGroup", "vendorCota",
+            // ── 真正被组包层读取的字段 ──
+            // 实测组包用的是 sf/a（BlRequest.java），它读的是
+            //   getBaseVersionInOemInfo / getCustVersionInOemInfo
+            // 而不是 baseVersion / custVersion。
+            // 这两个值来自 r9/d3（OemInfoUtil，读 oeminfo 分区），
+            // 必须一起改，否则两套值不一致，服务器仍按原版本判定。
+            "baseVersion", "custVersion",
+            "baseVersionInOemInfo", "custVersionInOemInfo",
+            "preloadVersion", "preloadVersionInOemInfo"
     };
 
     /**
