@@ -284,41 +284,106 @@ public class OtaHook extends XposedModule {
         try {
             Class<?> sp = Class.forName(Const.CLS_SYS_PROP_EX, false, cl);
 
-            // 静态 get(String)，返回 String。
-            final Method get = sp.getDeclaredMethod("get", String.class);
-            get.setAccessible(true);
+            // 两个重载都要挂：
+            //   get(String)        21 处调用
+            //   get(String,String) 87 处调用  ← 版本号读取全走这个
+            // 只挂前者会完全看不到效果，这是上一版的错误。
+            Method get2 = null;
+            try {
+                get2 = sp.getDeclaredMethod("get", String.class, String.class);
+                get2.setAccessible(true);
+            } catch (NoSuchMethodException ignored) {
+            }
 
-            hook(get).intercept(chain -> {
-                Object keyObj = chain.getArg(0);
-                String key = keyObj instanceof String ? (String) keyObj : null;
-                Object real = chain.proceed();
+            Method get1 = null;
+            try {
+                get1 = sp.getDeclaredMethod("get", String.class);
+                get1.setAccessible(true);
+            } catch (NoSuchMethodException ignored) {
+            }
 
-                if (key == null || !isVersionKey(key)) {
-                    return real;
-                }
-                java.util.Map<String, String> want = readSpoofConfig();
-                if (want.isEmpty()) {
-                    return real;
-                }
-                // 配置里可以按属性全名精确覆盖
-                String byKey = want.get(key);
-                if (byKey != null && !byKey.isEmpty()) {
-                    if (!byKey.equals(real)) {
-                        log(Log.INFO, TAG, "版本伪造 [" + key + "] "
-                                + real + " -> " + byKey);
+            if (get1 == null && get2 == null) {
+                log(Log.ERROR, TAG, "SystemPropertiesEx 没有 get 方法，放弃版本伪造");
+                return false;
+            }
+
+            // ── 双参版：get(String key, String def) ──
+            // 命中白名单键时返回配置值；否则原样透传（含默认值语义）。
+            if (get2 != null) {
+                hook(get2).intercept(chain -> {
+                    Object keyObj = chain.getArg(0);
+                    String key = keyObj instanceof String ? (String) keyObj : null;
+                    if (key == null) {
+                        return chain.proceed();
                     }
-                    return byKey;
-                }
-                return real;
-            });
+                    String v = spoofedValue(key);
+                    if (v == null) {
+                        return chain.proceed();
+                    }
+                    Object real = chain.proceed();
+                    if (!v.equals(real)) {
+                        log(Log.INFO, TAG, "版本伪造 [" + key + "] " + real + " -> " + v);
+                    }
+                    return v;
+                });
+            }
+
+            // ── 单参版：get(String key) ──
+            if (get1 != null) {
+                hook(get1).intercept(chain -> {
+                    Object keyObj = chain.getArg(0);
+                    String key = keyObj instanceof String ? (String) keyObj : null;
+                    if (key == null) {
+                        return chain.proceed();
+                    }
+                    String v = spoofedValue(key);
+                    if (v == null) {
+                        return chain.proceed();
+                    }
+                    Object real = chain.proceed();
+                    if (!v.equals(real)) {
+                        log(Log.INFO, TAG, "版本伪造 [" + key + "] " + real + " -> " + v);
+                    }
+                    return v;
+                });
+            }
 
             log(Log.INFO, TAG, "已挂 " + Const.CLS_SYS_PROP_EX
-                    + ".get()，版本类属性将按配置返回");
+                    + ".get(1参+2参)，版本类属性将按配置返回");
             return true;
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "挂 SystemPropertiesEx.get 失败: " + t);
             return false;
         }
+    }
+
+    /**
+     * 查某个属性键该不该被伪造，该则返回假值，不该返回 null。
+     *
+     * ── 为什么认 .real 后缀 ──
+     * 系统里每个版本属性都有一个 .real 孪生键（当前为空）。
+     * OUC 的读取套路是：先读 xxx.real，为空才回落到 xxx。
+     * 两边都要改，否则一旦某天 .real 被填值，假值就被绕过。
+     */
+    private static String spoofedValue(String key) {
+        if (!isVersionKey(key)) {
+            return null;
+        }
+        java.util.Map<String, String> want = readSpoofConfig();
+        if (want.isEmpty()) {
+            return null;
+        }
+        String v = want.get(key);
+        if (v != null && !v.isEmpty()) {
+            return v;
+        }
+        if (key.endsWith(".real")) {
+            v = want.get(key.substring(0, key.length() - 5));
+            if (v != null && !v.isEmpty()) {
+                return v;
+            }
+        }
+        return null;
     }
 
     /**
@@ -328,6 +393,9 @@ public class OtaHook extends XposedModule {
      * 这里只认白名单前缀 + 明确的几个键。
      */
     private static boolean isVersionKey(String key) {
+        if (key.endsWith(".real")) {
+            key = key.substring(0, key.length() - 5);
+        }
         for (String p : Const.SPOOF_PROP_KEYS) {
             if (key.equals(p)) {
                 return true;
