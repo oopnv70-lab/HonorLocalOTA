@@ -365,7 +365,7 @@ public class OtaHook extends XposedModule {
      * OUC 的读取套路是：先读 xxx.real，为空才回落到 xxx。
      * 两边都要改，否则一旦某天 .real 被填值，假值就被绕过。
      */
-    private static String spoofedValue(String key) {
+    private String spoofedValue(String key) {
         if (!isVersionKey(key)) {
             return null;
         }
@@ -411,7 +411,7 @@ public class OtaHook extends XposedModule {
      * 文件格式：key=value，# 开头是注释，值两侧空白会被去掉。
      * 读不到就返回空表，调用方按原版版本上报（即不伪造）。
      */
-    private static java.util.Map<String, String> readSpoofConfig() {
+    private java.util.Map<String, String> readSpoofConfig() {
         java.util.Map<String, String> out = new java.util.HashMap<>();
         for (String path : Const.SPOOF_CONFIG_PATHS) {
             java.io.BufferedReader br = null;
