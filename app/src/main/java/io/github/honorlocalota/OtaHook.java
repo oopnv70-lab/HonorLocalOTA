@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 import io.github.libxposed.api.XposedModule;
@@ -40,6 +41,28 @@ public class OtaHook extends XposedModule {
     /** 混淆后的真实类名，仅对 com.hihonor.ouc 2.1.1.1（versionCode 205）成立。 */
     private static final String CLS_KHL = "kh.l";
 
+    /**
+     * 检查更新的汇总基类，source: CheckMode.java。
+     *
+     * 手动检查走的 l5.d0（NormalMode.java）等 10 个模式类全部继承它，
+     * 而 p() 只在这个基类里定义，没有任何子类覆盖。
+     */
+    private static final String CLS_CHECK_BASE = "l5.b";
+
+    /** 汇总方法，签名 ()V，protected。 */
+    private static final String MTH_CHECK_SUM = "p";
+
+    /**
+     * 需要压回 false 的「有新版本」标志位。
+     *
+     * h 是最终结论（h = l || i），其余是参与合成的分项：
+     *   j 增量包 / k 参数更新 / l 完整包 / m COTA / n 附带项 / o 自身新版本。
+     * 全部压掉，是为了让对象在 hook 之后处于自洽的「真的没有新版本」状态。
+     */
+    private static final String[] CHECK_FLAGS = {
+            "h", "i", "l", "j", "k", "m", "n", "o"
+    };
+
     /** 当前正在显示的面板，同一时刻最多一个。 */
     private static volatile PanelView sPanel;
 
@@ -56,8 +79,18 @@ public class OtaHook extends XposedModule {
         ClassLoader cl = param.getClassLoader();
         log(Log.INFO, TAG, "onPackageReady: " + param.getPackageName());
 
-        if (hookK(cl)) {
+        // 两件事互相独立，不能因为一件挂不上就放弃另一件：
+        //   hookK/hookActivityResult → 本地更新入口（面板投放）
+        //   hookCheckSum             → 关掉「检查更新」的新版本提示
+        boolean k = hookK(cl);
+        if (k) {
             hookActivityResult();
+        } else {
+            log(Log.WARN, TAG, "本地更新入口未挂上，但继续尝试关闭检查更新");
+        }
+        boolean s = hookCheckSum(cl);
+
+        if (k || s) {
             hooked = true;
         }
     }
@@ -140,6 +173,72 @@ public class OtaHook extends XposedModule {
         } catch (Throwable t) {
             // 挂不上不致命，只是选完文件后面板收不到结果。
             log(Log.ERROR, TAG, "挂 Activity.onActivityResult 失败: " + t);
+        }
+    }
+
+    /**
+     * 挂 l5.b.p()，让检查更新的结论永远是「没有新版本」。
+     *
+     * ── 为什么是这个位置 ──
+     * 原版向服务器问完有没有新版本后，各模式类（NormalMode / ParaOnlyMode /
+     * HotaInfoMode / LiteNormalMode ...）把结果塞进 l5.b 的字段：
+     *     j 增量包  k 参数更新  l 完整包  m COTA  n 附带项  o 自身新版本
+     * 再在 p() 结尾合成：
+     *     i = (k || m || j)        → 有任一组件
+     *     h = (l || i)             → 有新版本（最终结论）
+     * 对应 b.smali 第 2963-2967 行那两条 iput-boolean。
+     *
+     * 选这里的三个理由：
+     *   1. p() 只在 l5.b 定义，10 个子类无一覆盖（grep 只命中 b 自己），
+     *      挂一次就覆盖全部检查模式。
+     *   2. 它是唯一的汇总出口，上游不管是 hota、cota、ecota 还是 patch，
+     *      最后都要在这里落成一个 boolean，没有第二条路。
+     *   3. p() 只写字段，不碰网络也不写数据库。写库的是 l5.d0.b0()，
+     *      它在第 1949 行读 h，那时读到的已经是我们压过的 false。
+     *
+     * ── 为什么不改上游响应 ──
+     * 上游 HTTP 在 gk.n.D(String, gk.b0)（baseAndPlugin getNewVersionFromServer），
+     * 但那条线的回调接口 source 是 CharacterCheckCallback.java，属于「字符与插件」，
+     * 跟 ROM 检查不是一套。ROM 这条线的响应解析分散在各 Mode 子类里，没有单一入口。
+     *
+     * ── 局限 ──
+     * 只压住 OUC 自己。CheckNewVersionReceiver 还会往 com.hihonor.phoneservice
+     * 发一条 HAS_NEW_ROM 广播，那条链不在本 hook 覆盖范围内。
+     * 类名与字段名都是混淆产物，只对本 APK 版本成立。
+     */
+    private boolean hookCheckSum(ClassLoader cl) {
+        try {
+            Class<?> base = Class.forName(CLS_CHECK_BASE, false, cl);
+            Method sum = base.getDeclaredMethod(MTH_CHECK_SUM);
+
+            // 先解析全部字段。任何一个取不到就整体放弃：
+            // 字段名对不上说明 OUC 换了版本，这时挂上去只会空转，不如明确报错。
+            final Field[] fields = new Field[CHECK_FLAGS.length];
+            for (int i = 0; i < CHECK_FLAGS.length; i++) {
+                Field f = base.getDeclaredField(CHECK_FLAGS[i]);
+                f.setAccessible(true);
+                fields[i] = f;
+            }
+
+            hook(sum).intercept(chain -> {
+                Object r = chain.proceed();   // 先让原版把各标志算完
+                Object self = chain.getThisObject();
+                try {
+                    for (Field f : fields) {
+                        f.setBoolean(self, false);
+                    }
+                } catch (Throwable t) {
+                    log(Log.ERROR, TAG, "清理新版本标志失败: " + t);
+                }
+                return r;
+            });
+
+            log(Log.INFO, TAG, "已挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM + "()，检查更新将恒为无新版本");
+            return true;
+        } catch (Throwable t) {
+            // 挂不上不影响本地更新功能，只是关不掉检查更新。
+            log(Log.ERROR, TAG, "挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM + " 失败: " + t);
+            return false;
         }
     }
 
