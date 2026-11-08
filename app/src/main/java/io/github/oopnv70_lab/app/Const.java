@@ -93,6 +93,31 @@ final class Const {
     /** 全量包。 */
     static final String PKG_TYPE_RECOVERY = "recovery";
 
+    // ─────────────── 红点 ───────────────
+    /**
+     * 红点（角标）的绘制开关类。
+     *
+     * source: Lcom/hihonor/uikit/hneventbadge/widget/HnEventBadgeView;
+     *
+     * 该类是 OUC 自带的 UI 组件——整个 dex 里只有这一处引用，
+     * 不是从系统 uikit 共享来的，所以挂它不会波及其他应用。
+     * 红点最终通过 setVisibility 控制，那 7 个调用方全在本类和
+     * 同包辅助类 widget/b 内部，是红点显示的唯一收口。
+     *
+     * 对 18.0.3.230（versionCode 180003230）的 classes2.dex 实测：
+     *   method_id [32826] HnEventBadgeView->setBadgeVisible(Z)V
+     */
+    static final String CLS_BADGE = "com.hihonor.uikit.hneventbadge.widget.HnEventBadgeView";
+
+    /**
+     * 红点可见性设置方法，签名 (Z)V。
+     *
+     * 名字没有混淆（是框架/support 库里常见的公开 API 命名习惯），
+     * 这点与 kh.l.K()、r9.w1.x2() 那种纯混淆名不同，
+     * 相对更可能在版本升级后仍然存在。
+     */
+    static final String MTH_BADGE = "setBadgeVisible";
+
     private Const() {
     }
 }

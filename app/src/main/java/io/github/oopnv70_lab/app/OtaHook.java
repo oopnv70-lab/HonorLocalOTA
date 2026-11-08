@@ -98,10 +98,11 @@ public class OtaHook extends XposedModule {
         ClassLoader cl = param.getClassLoader();
         log(Log.INFO, TAG, "onPackageReady: " + param.getPackageName());
 
-        // 三件事互相独立，不能因为一件挂不上就放弃其余：
+        // 四件事互相独立，不能因为一件挂不上就放弃其余：
         //   hookK/hookActivityResult → 本地更新入口（面板投放）
         //   hookCheckSum             → 关掉「检查更新」的新版本提示
         //   hookPackageType          → 强制向服务器要全量包
+        //   hookBadge                → 不显示红点
         boolean k = hookK(cl);
         if (k) {
             hookActivityResult();
@@ -110,8 +111,9 @@ public class OtaHook extends XposedModule {
         }
         boolean s = hookCheckSum(cl);
         boolean f = hookPackageType(cl);
+        boolean b = hookBadge(cl);
 
-        if (k || s || f) {
+        if (k || s || f || b) {
             hooked = true;
         }
     }
@@ -334,6 +336,64 @@ public class OtaHook extends XposedModule {
         } catch (Throwable t) {
             // 挂不上只是没有全量包功能，不影响已经工作的屏蔽与本地更新。
             log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + "." + Const.MTH_PKG_TYPE + " 失败: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 挂 HnEventBadgeView.setBadgeVisible(boolean)，让红点永远不显示。
+     *
+     * ── 为什么挂这里，而不是业务层的判断 ──
+     *   红点由荣耀自家的 HnEventBadgeView 绘制，最终靠 setVisibility 控制。
+     *   该方法的 invoke 调用方共 7 处，全部在 HnEventBadgeView 自己和同包
+     *   辅助类 widget/b 内部——无论业务层从哪条路决定「要显示红点」，
+     *   最后都会汇到这一个方法上。
+     *
+     *   挂在业务层就必须先知道「哪个字段或哪条记录决定红点」，而
+     *   HAS_NEW_ROM / HAS_NEW_VERSION 这类键在整个 dex 里没有任何
+     *   const-string 引用，说明是动态拼接写入的，追起来成本高且容易漏。
+     *   挂收口方法只依赖一个字符串，代价小得多。
+     *
+     * ── 为什么传新参数而不是直接 return ──
+     *   原版签名 (Z)V，参数就是「是否显示」。用 proceed(Object[]) 传入
+     *   false 后仍让原方法照常执行，它内部的 setVisibility 等状态维护
+     *   就都还在；直接 return null 会留下「数据层认为该显示、View 层没
+     *   设置」的不一致。
+     *
+     *   这里不能用 setArg：libxposed 102 的 Chain 只有 getArg/getArgs，
+     *   修改入参的唯一途径是 proceed(Object[]) 或 proceedWith。
+     *
+     * ── 开关 ──
+     *   与另外两个 hook 共用「屏蔽系统更新」这一个开关
+     *   （isBlockEffective，强制全量包开着时自动失效）。
+     *   用户关掉屏蔽就是想恢复真实提示，红点也该跟着回来。
+     *
+     * ── 局限 ──
+     *   只压本进程内这个 View 的红点。若某个红点绕开该组件自绘
+     *   （例如桌面图标角标由 launcher 按通知数自行绘制），不在覆盖范围内。
+     *   实测本机 com.hihonor.ouc 没有挂任何通知，当前不存在这条路径。
+     */
+    private boolean hookBadge(ClassLoader cl) {
+        try {
+            Class<?> badge = Class.forName(Const.CLS_BADGE, false, cl);
+            Method m = badge.getDeclaredMethod(Const.MTH_BADGE, boolean.class);
+            hook(m).intercept(chain -> {
+                // 开关关着就原样放行，保留真实的红点行为。
+                if (!SwitchStore.isBlockEffective()) {
+                    return chain.proceed();
+                }
+                // 把「是否显示」改成 false，再交给原方法执行。
+                // 注意：libxposed 102 的 Chain 没有 setArg，
+                // 只能构造一个新的参数数组走 proceed(Object[]) 重载
+                // （见 XposedInterface.Chain#proceed(Object[])）。
+                return chain.proceed(new Object[]{Boolean.FALSE});
+            });
+            log(Log.INFO, TAG, "已挂 " + Const.CLS_BADGE + "." + Const.MTH_BADGE
+                    + "(boolean)，红点将不显示");
+            return true;
+        } catch (Throwable t) {
+            // 挂不上只是红点不受控，不影响其余三个功能。
+            log(Log.ERROR, TAG, "挂 " + Const.CLS_BADGE + "." + Const.MTH_BADGE + " 失败: " + t);
             return false;
         }
     }
