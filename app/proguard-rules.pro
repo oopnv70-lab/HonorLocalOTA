@@ -17,7 +17,7 @@
 # SettingsActivity 由 AndroidManifest 的 android:name=".SettingsActivity" 引用。
 # AGP 会自动为 manifest 里声明的四大组件生成 keep 规则，这里显式写一遍是
 # 为了防「agp 版本变化导致规则缺失」——类名一旦被混淆，桌面图标点开就崩。
--keep class io.github.honorlocalota.SettingsActivity { *; }
+-keep class io.github.oopnv70_lab.app.SettingsActivity { *; }
 
 # Theme / SwitchButton / SwitchStore 是纯内部实现，由上面的类直接 new 出来，
 # 不按名字反射，因此不 keep。

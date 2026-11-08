@@ -1,4 +1,4 @@
-package io.github.honorlocalota;
+package io.github.oopnv70_lab.app;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;

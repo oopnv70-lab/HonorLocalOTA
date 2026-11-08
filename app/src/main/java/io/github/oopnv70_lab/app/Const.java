@@ -1,4 +1,4 @@
-package io.github.honorlocalota;
+package io.github.oopnv70_lab.app;
 
 /**
  * 常量单一出处。全部来自对 com.hihonor.ouc 2.1.1.1（versionCode 205）的反编译，
@@ -28,7 +28,7 @@ final class Const {
     // ─────────────── 开关文件 ───────────────
 
     /**
-     * 开关文件路径。两个进程共享，不需要 root。
+     * 开关文件路径。两个不同 SELinux 域的进程共享同一个文件。
      *
      * ── 为什么放这里而不是 SharedPreferences ──
      *   SharedPreferences 按 uid 隔离：本模块是自己的 uid，
@@ -37,13 +37,18 @@ final class Const {
      *   （已核过 api-102.0.0 的全部 class，只有 hook 相关的东西）。
      *   所以只能落到双方都能访问的文件上。
      *
-     * ── 为什么这个路径两个进程都能用（实测，不是推断）──
+     * ── 两个进程的访问方式并不一样，这里必须写清楚 ──
      *   /data/local_ota 权限 drwxrwxrwx system:cache，标签 local_ota_file。
-     *   · 模块进程（普通 app uid）：实测 su 10357 -c touch → rc=0，可读写。
-     *     所以 App 里的开关不需要 root 就能保存。
-     *   · OUC 进程（platform_app 域）：system_ext_sepolicy.cil
-     *     allow platform_app_all local_ota_file，本来就允许访问，
-     *     而且这个目录就是它自己扫描安装包的目录，必然可读。
+     *   从 /system_ext/etc/selinux/system_ext_sepolicy.cil 抽出的全部
+     *   allow 规则只有四个域：adbd / platform_app_all / shell / update_engine。
+     *
+     *   · OUC 进程（platform_app_all 域）：在放行名单里，直接读写即可。
+     *   · 本模块 App（untrusted_app 域）：不在名单里，连 getattr 都没有，
+     *     所以设置页必须经 su 访问（见 RootShell.java），因此需要 root。
+     *
+     *   注意：不要用 `su <uid> -c ...` 去测本模块能不能写。那样的进程
+     *   跑在 ksu/shell 域，测出来的结果是「能写」，但 App 真实运行域是
+     *   untrusted_app，结论不成立。要测就必须看目标进程 ps -AZ 的实际域。
      */
     static final String SWITCH_FILE = DST_DIR + "/module_switch.conf";
 

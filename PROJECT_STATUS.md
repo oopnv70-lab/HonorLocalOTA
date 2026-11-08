@@ -117,7 +117,7 @@ OUC 域 `u:r:platform_app_36:s0:c512,c768` 属于 `platform_app_all`，**有完�
 
 ## 七、代码结构
 
-`app/src/main/java/io/github/honorlocalota/`
+`app/src/main/java/io/github/oopnv70_lab/app/`
 
 | 文件 | 职责 |
 |---|---|
@@ -177,7 +177,7 @@ hook 点：`com.hihonor.android.hnouc.check.model.checkinfo.Request$ParamBuilder
 **桌面入口**：`SettingsActivity`（manifest 声明 MAIN/LAUNCHER），
 顶部只读显示本机真实版本串供对照，中间全文编辑配置文件，底部保存/重载/清空。
 首次打开若没有「所有文件访问」权限会主动跳系统设置页。
-`proguard-rules.pro` 已加 `-keep class io.github.honorlocalota.SettingsActivity { *; }`。
+`proguard-rules.pro` 已加 `-keep class io.github.oopnv70_lab.app.SettingsActivity { *; }`。
 
 **attestation 不受影响**（已查证）：`attestationChallenge = ia/a.d()` → `r9/w1.V2()` →
 `Build.getSerial()`，本机 `AAXL6R5C04000374`，固定值非随机 nonce；

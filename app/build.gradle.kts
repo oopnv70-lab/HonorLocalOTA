@@ -3,15 +3,22 @@ plugins {
 }
 
 android {
-    namespace = "io.github.honorlocalota"
+    namespace = "io.github.oopnv70_lab.app"
     compileSdk = 37
     buildToolsVersion = "37.0.0"
 
     defaultConfig {
+        // applicationId 必须与提交到 LSPosed 仓库时使用的包名完全一致：
+        // bot 会用 issue 标题里的包名建仓库，LSPosed 管理器再按 applicationId
+        // 匹配更新。两边不一致时模块能装、也能正常 hook，但永远收不到更新。
+        // 校验依据（Xposed-Modules-Repo/submission 的 bot.ts）：
+        //   getPrefixLowercase(username) = "io.github." + username.toLowerCase().replaceAll('-','_') + "."
+        // 因此必须是 io.github.oopnv70_lab.*，注意是下划线不是连字符。
+        applicationId = "io.github.oopnv70_lab.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 3
-        versionName = "2.1"
+        versionCode = 4
+        versionName = "2.2"
     }
 
     buildTypes {
