@@ -89,6 +89,13 @@ public class OtaHook extends XposedModule {
 
     @Override
     public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
+        // 两个作用域，两套完全不同的 hook：
+        //   com.hihonor.ouc      → 面板、屏蔽检查、全量包、红点计数的写入端
+        //   com.android.settings → 红点的读取端（那个红点是设置画的）
+        if (Const.PKG_SETTINGS.equals(param.getPackageName())) {
+            hookSettingsScope(param.getClassLoader());
+            return;
+        }
         if (!Const.PKG_OUC.equals(param.getPackageName())) {
             return;
         }
@@ -338,6 +345,83 @@ public class OtaHook extends XposedModule {
         } catch (Throwable t) {
             // 挂不上只是没有全量包功能，不影响已经工作的屏蔽与本地更新。
             log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + "." + Const.MTH_PKG_TYPE + " 失败: " + t);
+            return false;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 下面是 com.android.settings 的作用域，只处理那个红点
+    // ═══════════════════════════════════════════════════════════════
+
+    /** 设置进程只挂一次。 */
+    private volatile boolean settingsHooked;
+
+    /**
+     * 设置进程里的入口。
+     *
+     * 设置进程只做一件事：把 hn_new_system_update 的读取值压成 0。
+     * 其余 hook（面板、全量包）在这个进程里没有意义，不挂。
+     */
+    private void hookSettingsScope(ClassLoader cl) {
+        if (settingsHooked) {
+            return;
+        }
+        log(Log.INFO, TAG, "onPackageReady: " + Const.PKG_SETTINGS);
+        boolean g = hookSecureGetInt(cl);
+        if (g) {
+            settingsHooked = true;
+        }
+    }
+
+    /**
+     * 挂 Settings.Secure.getInt(ContentResolver, String, int)，只拦一个键。
+     *
+     * ── 为什么用兜底开关而不是直接读配置 ──
+     *   这个类跑在 com.android.settings 进程，和 OUC 不是同一个 uid。
+     *   屏蔽开关文件 /data/local_ota/module_switch.conf 的 SELinux 标签是
+     *   local_ota_file，放行名单只有 adbd / platform_app_all / shell /
+     *   update_engine 四个域（从 system_ext_sepolicy.cil 抽出来的全部规则）。
+     *   『系统设置』是 system_app 域，不在名单里，读不到这个文件。
+     *   所以这里退一步：
+     *     · 开关默认值是「开」（DEFAULT_BLOCK_UPDATE = true），
+     *       读不到就按「屏蔽生效」处理，这与模块的默认行为一致；
+     *     · 为了不把用户「主动关掉屏蔽」的意图吞掉，另加一个
+     *       进程内可见的兜底：读不到配置时，只要读到的值不是 0
+     *       就仍然压成 0——因为用户装这个模块就是为了屏蔽。
+     *   代价是：在设置进程里关不掉这个行为。
+     *   这一点写进 README，不藏着。
+     *
+     * ── 为什么改返回值而不是拦掉调用 ──
+     *   原方法是 public static，4 个调用点拿到的都是 int。
+     *   拦掉会让调用方拿到默认值 0，效果一样但要构造返回值；
+     *   直接 proceed 再改结果，语义最贴近「这个设置项就是 0」。
+     */
+    private boolean hookSecureGetInt(ClassLoader cl) {
+        try {
+            Class<?> secure = Class.forName(Const.CLS_SECURE, false, cl);
+            Method getInt = secure.getDeclaredMethod(
+                    Const.MTH_GET_INT,
+                    android.content.ContentResolver.class, String.class, int.class);
+            getInt.setAccessible(true);
+            hook(getInt).intercept(chain -> {
+                Object ret = chain.proceed();
+                Object[] a = chain.getArgs().toArray();
+                // a[1] 是 key。只处理这一个键，其余设置项原样返回。
+                if (a.length >= 2 && Const.KEY_HN_NEW_SYSTEM_UPDATE.equals(a[1])) {
+                    if (!(ret instanceof Integer) || ((Integer) ret) != Const.NO_NEW_UPDATE) {
+                        log(Log.INFO, TAG, "设置读 "
+                                + Const.KEY_HN_NEW_SYSTEM_UPDATE + "=" + ret
+                                + " -> " + Const.NO_NEW_UPDATE);
+                    }
+                    return Const.NO_NEW_UPDATE;
+                }
+                return ret;
+            });
+            log(Log.INFO, TAG, "已挂 Settings.Secure.getInt，"
+                    + Const.KEY_HN_NEW_SYSTEM_UPDATE + " 读取值将恒为 0");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 Settings.Secure.getInt 失败: " + t);
             return false;
         }
     }

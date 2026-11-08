@@ -147,6 +147,37 @@ final class Const {
      */
     static final int NO_NEW_UPDATE = 0;
 
+    // ─────────────── 设置侧（红点的绘制方）───────────────
+
+    /**
+     * 系统设置包名。那个红点是它画的，不是 OUC 画的。
+     *
+     * ── 为什么必须把设置也纳入作用域 ──
+     *   实测红点在 Settings$HwSystemDashboardActivity 里，
+     *   控件 id update_count。查 dex 发现设置侧读 hn_new_system_update
+     *   的地方一共 4 处，属于三个不同用途：
+     *     dashboard.r0.b()   → 仪表盘上那个红点
+     *     dashboard.r0.e()   → 注册 ContentObserver 后立刻读一次
+     *     shortcuts.a.v()    → 桌面快捷方式是否标记「有新版本」
+     *     SystemUpdateSettingsController.getUpdateState() → 系统更新页状态
+     *   只在 OUC 侧把写入值压成 0，管不到这 4 个读点里已经存在的值，
+     *   也管不到将来别的地方再写一次。所以要在读的这一端也堵住。
+     */
+    static final String PKG_SETTINGS = "com.android.settings";
+
+    /** Settings.Secure 的类名，读/写都走它。 */
+    static final String CLS_SECURE = "android.provider.Settings$Secure";
+
+    /**
+     * 读取字符串设置项的方法，签名 (ContentResolver, String, int)int。
+     *
+     * ── 为什么挂这一个而不是挂上面 4 个调用点 ──
+     *   4 个调用点分布在 3 个类里，要各挂一次，且任何一个版本改了实现
+     *   就漏一个。而它们全部走同一个重载 getInt(ContentResolver,String,int)，
+     *   挂这里一次覆盖全部，按 key 过滤只影响这一个设置项。
+     */
+    static final String MTH_GET_INT = "getInt";
+
     private Const() {
     }
 }
