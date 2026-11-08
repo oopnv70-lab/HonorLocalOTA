@@ -5,6 +5,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+env:
+  # 期望的签名证书 SHA-256（固定签名，改动即报警）。留空则跳过校验。
+  EXPECTED_CERT_SHA256: '4B:ED:77:F9:6F:27:28:16:81:D1:A0:09:15:82:64:B9:51:DD:A6:7D:CE:4E:98:09:A0:43:54:39:F3:00:6F:86'
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,10 +22,39 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      - name: Build release
-        run: gradle assembleRelease --no-daemon --stacktrace
-      - name: Collect artifact
+
+      # 固定签名：从 secrets 还原 keystore 到 runner。
+      # 缺 secret 直接失败——绝不退回 debug 签名，否则产物无法覆盖升级。
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ] || [ -z "${KEYSTORE_PASSWORD:-}" ]; then
+            echo 'ERROR: 缺少 KEYSTORE_BASE64 / KEYSTORE_PASSWORD secret'
+            echo '没有固定签名会生成一次性 debug 密钥，产物无法覆盖升级。'
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/keys"
+          KS="$RUNNER_TEMP/keys/release.keystore"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          chmod 600 "$KS"
+          echo "keystore 大小: $(stat -c%s "$KS") B"
+          echo "KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
+
+      - name: Build release
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Collect artifact
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
           mkdir -p out
           APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
           echo "found: $APK"
@@ -34,6 +66,32 @@ jobs:
           unzip -p out/HonorLocalOTA.apk AndroidManifest.xml > /dev/null && echo 'manifest present'
           echo '--- verify license in apk ---'
           unzip -l out/HonorLocalOTA.apk | grep -i 'LICENSE' || { echo 'MISSING LICENSE'; exit 1; }
+
+      # 校验实际签名证书，防止悄悄退回 debug 签名导致用户无法覆盖升级。
+      - name: Verify signature
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1)
+          echo "build-tools: $BT"
+          APKSIGNER="$BT/apksigner"
+          if [ ! -x "$APKSIGNER" ]; then
+            echo 'ERROR: 找不到 apksigner'
+            exit 1
+          fi
+          "$APKSIGNER" verify --print-certs out/HonorLocalOTA.apk | tee /tmp/certs.txt
+          CERT=$("$APKSIGNER" verify --print-certs out/HonorLocalOTA.apk \
+                 | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1)
+          echo "实际证书 SHA-256: $CERT"
+          if [ -n "${EXPECTED_CERT_SHA256:-}" ] && [ "$CERT" != "$EXPECTED_CERT_SHA256" ]; then
+            echo 'ERROR: 签名证书与预期不一致，产物无法覆盖升级'
+            echo "  预期: $EXPECTED_CERT_SHA256"
+            echo "  实际: $CERT"
+            exit 1
+          fi
+          echo '签名校验通过'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -51,19 +109,19 @@ jobs:
           set -euo pipefail
           VC=""
           VN=""
-          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 2>/dev/null | tail -1 || true)
-          if [ -n "${AAPT:-}" ]; then
-            BADGING=$("$AAPT" dump badging out/HonorLocalOTA.apk 2>/dev/null | head -1 || true)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | tail -1 || true)
+          if [ -x "$BT/aapt2" ]; then
+            BADGING=$("$BT/aapt2" dump badging out/HonorLocalOTA.apk 2>/dev/null | head -1 || true)
             VC=$(printf '%s' "${BADGING:-}" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p")
             VN=$(printf '%s' "${BADGING:-}" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
           fi
           if [ -z "$VC" ] || [ -z "$VN" ]; then
-            echo 'aapt2 unavailable -> fallback to app/build.gradle.kts'
+            echo 'aapt2 不可用 -> 回退解析 app/build.gradle.kts'
             VC=$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' app/build.gradle.kts | head -1)
             VN=$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
           fi
           if [ -z "$VC" ] || [ -z "$VN" ]; then
-            echo 'cannot resolve versionCode/versionName from apk or gradle file'
+            echo 'cannot resolve versionCode/versionName'
             exit 1
           fi
           echo "versionCode = $VC"
@@ -86,7 +144,7 @@ jobs:
           cp out/HonorLocalOTA.apk "out/$ASSET"
           NOTES=$(printf 'Automated build from %s\n\nversionCode %s / versionName %s' "$GITHUB_SHA" "$VC" "$VN")
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists -> replace asset"
+            echo "release $TAG 已存在 -> 覆盖资产"
             gh release upload "$TAG" "out/$ASSET" --clobber
             gh release edit "$TAG" --title "$VN" --notes "$NOTES"
           else
