@@ -67,6 +67,10 @@ public class SettingsActivity extends Activity {
     /** 后台读写进行中，防止连点导致并发 fork。 */
     private volatile boolean busy;
 
+    /** 「重启软件更新」按钮与它的状态行。 */
+    private TextView restartHint;
+    private TextView restartBtn;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -95,7 +99,10 @@ public class SettingsActivity extends Activity {
         // ── 卡片三：本地更新 ──
         page.addView(buildLocalCard(), theme.gaps(this, 14, 0));
 
-        // ── 卡片四：状态 ──
+        // ── 卡片四：重启「软件更新」 ──
+        page.addView(buildRestartCard(), theme.gaps(this, 14, 0));
+
+        // ── 卡片五：状态 ──
         page.addView(buildStatusCard(), theme.gaps(this, 14, 0));
 
         ScrollView sv = new ScrollView(this);
@@ -252,6 +259,92 @@ public class SettingsActivity extends Activity {
         card.addView(desc, theme.gaps(this, 10, 0));
 
         return card;
+    }
+
+    // ─────────────── 卡片：重启「软件更新」 ───────────────
+
+    /**
+     * 一个按钮：以 root 执行 force-stop + am start，把「软件更新」拉成干净进程。
+     *
+     * ── 这个按钮到底解决什么 ──
+     *   两个开关是「读时生效」的（SwitchStore 每次都真读文件，没有缓存），
+     *   所以单纯改开关并不需要重启。会用到重启的是这两种情况：
+     *     · 刚在 LSPosed 里启用/更新模块 —— hook 只在 OUC 进程启动时挂载，
+     *       旧进程还带着旧代码，三点菜单里看不到本地更新入口；
+     *     · OUC 界面状态卡住。
+     *   界面上必须把这点写清楚，否则用户会以为所有改动都要点一次重启。
+     */
+    private LinearLayout buildRestartCard() {
+        LinearLayout card = theme.card(this);
+        card.addView(theme.sectionTitle(this, "重启软件更新"), theme.matchWrap());
+
+        TextView desc = theme.text(this,
+                "以 root 停掉「软件更新」进程再重新打开。",
+                13, theme.onSurfaceVariant);
+        desc.setLineSpacing(Theme.dp(this, 3), 1f);
+        card.addView(desc, theme.gaps(this, 12, 0));
+
+        TextView when = theme.text(this,
+                "什么时候用：刚在 LSPosed 里启用或更新了本模块，但「软件更新」的"
+                        + "三点菜单里看不到本地更新入口；或者它的界面卡住了。"
+                        + "两个开关是即时生效的，改开关不需要点这里。",
+                12, theme.onSurfaceVariant);
+        when.setLineSpacing(Theme.dp(this, 3), 1f);
+        card.addView(when, theme.gaps(this, 8, 0));
+
+        restartBtn = theme.text(this, "重启「软件更新」", 16, theme.onPrimary);
+        restartBtn.setGravity(Gravity.CENTER);
+        restartBtn.setTypeface(android.graphics.Typeface.create(
+                "sans-serif-medium", android.graphics.Typeface.NORMAL));
+        restartBtn.setPadding(0, Theme.dp(this, 12), 0, Theme.dp(this, 12));
+        restartBtn.setBackground(theme.rounded(this, theme.primary, 999));
+        restartBtn.setClickable(true);
+        card.addView(restartBtn, theme.gaps(this, 16, 0));
+
+        restartHint = theme.text(this, "", 12, theme.onSurfaceVariant);
+        restartHint.setPadding(0, Theme.dp(this, 10), 0, 0);
+        card.addView(restartHint, theme.matchWrap());
+
+        restartBtn.setOnClickListener(v -> doRestart());
+        return card;
+    }
+
+    /**
+     * 执行重启。
+     *
+     * 按钮要立刻置灰并改文案，否则用户会连点；
+     * 整个流程在后台线程做，因为内部要 fork su，不能在 UI 线程阻塞。
+     */
+    private void doRestart() {
+        if (busy) {
+            toast("上一个操作还没完成");
+            return;
+        }
+        busy = true;
+        restartBtn.setEnabled(false);
+        restartBtn.setText("正在重启…");
+        restartBtn.setBackground(theme.rounded(this, theme.surfaceVariant, 999));
+        restartBtn.setTextColor(theme.onSurfaceVariant);
+        restartHint.setText("正在停止并重新启动「软件更新」…");
+        restartHint.setTextColor(theme.onSurfaceVariant);
+
+        new Thread(() -> {
+            final OucRestarter.Result r = OucRestarter.restart();
+            ui.post(() -> {
+                busy = false;
+                restartBtn.setEnabled(true);
+                restartBtn.setText("重启「软件更新」");
+                restartBtn.setBackground(theme.rounded(this, theme.primary, 999));
+                restartBtn.setTextColor(theme.onPrimary);
+                if (r.ok) {
+                    restartHint.setText(r.detail + "，界面已打开。");
+                    restartHint.setTextColor(theme.primary);
+                } else {
+                    restartHint.setText("重启失败：" + r.detail);
+                    restartHint.setTextColor(theme.onSurfaceVariant);
+                }
+            });
+        }, "ouc-restart").start();
     }
 
     // ─────────────── 卡片：状态 ───────────────

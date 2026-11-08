@@ -40,6 +40,12 @@ final class RootShell {
     /** 单条脚本的超时。su 正常在几十毫秒内返回，给足余量防卡死。 */
     private static final long TIMEOUT_MS = 8000;
 
+    /**
+     * 重启「软件更新」时要连续执行 force-stop + am start，
+     * am start 本身可能等上几秒，8 秒的默认值偏紧，因此允许调用方指定超时。
+     */
+    static final long LONG_TIMEOUT_MS = 20000;
+
     /** 执行结果。code 为 -1 表示没能启动 su 或超时。 */
     static final class Out {
         final int code;
@@ -64,6 +70,11 @@ final class RootShell {
      * 脚本里不要用单引号包裹含单引号的内容——base64 方案已经避开了这个需求。
      */
     static Out run(String script) {
+        return run(script, TIMEOUT_MS);
+    }
+
+    /** 带自定义超时的版本。timeoutMs <= 0 时用默认值。 */
+    static Out run(String script, long timeoutMs) {
         Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(SU, "-c", script);
@@ -76,7 +87,7 @@ final class RootShell {
             final Process fp = p;
             Thread killer = new Thread(() -> {
                 try {
-                    Thread.sleep(TIMEOUT_MS);
+                    Thread.sleep(timeoutMs > 0 ? timeoutMs : TIMEOUT_MS);
                 } catch (InterruptedException ignored) {
                     return;
                 }
