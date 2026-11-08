@@ -159,3 +159,34 @@ jobs:
           else
             gh release create "$TAG" "out/$ASSET" --title "$VN" --notes "$NOTES"
           fi
+
+      # LSPosed 管理器只读模块仓库的 Release，源码仓库的 Release 它不看。
+      # 所以必须把同一个 APK 再发到 Xposed-Modules-Repo/io.github.oopnv70_lab.app，
+      # 否则用户装了模块也永远收不到更新。
+      # tag 规则必须与模块仓库一致：{versionCode}-{versionName}。
+      - name: Publish to LSPosed module repo
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.MODULE_REPO_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VN: ${{ steps.ver.outputs.vn }}
+          VC: ${{ steps.ver.outputs.vc }}
+        run: |
+          set -euo pipefail
+          MODULE_REPO="Xposed-Modules-Repo/io.github.oopnv70_lab.app"
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo 'ERROR: 缺少 MODULE_REPO_TOKEN secret，无法发布到模块仓库'
+            echo 'LSPosed 管理器只读模块仓库，不发布等于用户收不到更新。'
+            exit 1
+          fi
+          ASSET="HonorLocalOTA-${VN}.apk"
+          cp out/HonorLocalOTA.apk "out/$ASSET"
+          NOTES=$(printf 'Automated build from %s\n\nversionCode %s / versionName %s' "$GITHUB_SHA" "$VC" "$VN")
+          if gh release view "$TAG" -R "$MODULE_REPO" >/dev/null 2>&1; then
+            echo "模块仓库已有 $TAG -> 覆盖资产"
+            gh release upload "$TAG" "out/$ASSET" -R "$MODULE_REPO" --clobber
+            gh release edit "$TAG" -R "$MODULE_REPO" --title "$VN" --notes "$NOTES"
+          else
+            gh release create "$TAG" "out/$ASSET" -R "$MODULE_REPO" --title "$VN" --notes "$NOTES"
+          fi
+          echo '已发布到模块仓库:' "https://github.com/$MODULE_REPO/releases/tag/$TAG"
