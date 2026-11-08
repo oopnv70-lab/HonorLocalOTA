@@ -2,6 +2,15 @@ plugins {
     alias(libs.plugins.agp.app)
 }
 
+// 发布签名：CI 由 GitHub Secrets 注入（KEYSTORE_PATH / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD）。
+// 找不到 keystore 时退回 debug 签名，保证本地和 fork 也能构建；
+// 但 debug 签名每次构建都是新密钥，产物无法覆盖升级，不能用于发布。
+// 见 workflow 里的 "Prepare signing key"，缺 secret 时那里会直接失败。
+val keystorePath: String? = System.getenv("KEYSTORE_PATH")
+val keystoreFile = keystorePath?.let { File(it) }
+val hasReleaseKey: Boolean =
+    keystoreFile?.exists() == true && !System.getenv("KEYSTORE_PASSWORD").isNullOrEmpty()
+
 android {
     namespace = "io.github.oopnv70_lab.app"
     compileSdk = 37
@@ -21,12 +30,28 @@ android {
         versionName = "2.2"
     }
 
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS") ?: "oopnv70lab"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles("proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseKey) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn("KEYSTORE_PATH / KEYSTORE_PASSWORD 未设置，release 将使用 debug 签名（不可发布）")
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
