@@ -178,6 +178,43 @@ final class Const {
      */
     static final String MTH_GET_INT = "getInt";
 
+    // ─────────────── 桌面图标角标（红点的第二个出口）───────────────
+
+    /**
+     * 桌面角标的写入口 URI（桌面的 LauncherProvider）。
+     *
+     * ── 为什么设置页红点没了、桌面图标上还有 ──
+     *   桌面「设置」图标的角标不读 Settings.Secure，走的是桌面自己的
+     *   badge 表（launcher.db 里的 badge 表，对外经 com.android.badge
+     *   这个 authority 暴露）。写入方是 com.hihonor.ouc：
+     *     r9.w1.V6(Context,int) → t3(Context,int)
+     *       → ContentResolver.call(本 URI, "change_badge", "", bundle)
+     *       → bundle = { package = com.android.settings,
+     *                    class   = com.android.settings.HWSettings,
+     *                    badgenumber = n }
+     *   package/class 取自 DeviceUtils.f()/b()，固定指向设置而不是 OUC
+     *   自己，也就是「OUC 代设置写角标」。所以两头都要堵。
+     */
+    static final String URI_LAUNCHER_BADGE =
+            "content://com.hihonor.android.launcher.settings/badge/";
+
+    /**
+     * 上面那个 URI 的写入方法名。
+     *
+     * 同一个 provider 还有一个 checkcancallbadge（只探测能否调用），
+     * OUC 的 d0(Context) 就是先探它、成功再走 t3()，本模块不需要探测。
+     */
+    static final String MTH_CHANGE_BADGE = "change_badge";
+
+    /**
+     * 设置应用在桌面上的入口 Activity，角标表里的 class 列就是它。
+     *
+     * 取自 com.hihonor.hnouc.DeviceUtils.b()，是个写死的常量。不能换成
+     * com.android.settings.Settings——provider 按 (package, class) 找行，
+     * 对不上就写不进去，角标也不会变。
+     */
+    static final String CLS_SETTINGS_ENTRY = "com.android.settings.HWSettings";
+
     private Const() {
     }
 }

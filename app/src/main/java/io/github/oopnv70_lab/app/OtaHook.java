@@ -3,6 +3,8 @@ package io.github.oopnv70_lab.app;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
+import android.os.Bundle;
 import android.util.Log;
 
 import java.lang.reflect.Field;
@@ -480,14 +482,57 @@ public class OtaHook extends XposedModule {
                     log(Log.INFO, TAG, "红点计数 " + args[1] + " -> " + Const.NO_NEW_UPDATE);
                     args[1] = Const.NO_NEW_UPDATE;
                 }
-                return chain.proceed(args);
+                Object ret = chain.proceed(args);
+                // ── 为什么光改入参不够 ──
+                //   V6 内部把「写 Secure」和「写桌面角标」都放在同一个
+                //   if (p1 != X1(ctx)) 里。X1() 读的是 Secure 表当前值，
+                //   一旦那里已经是 0（比如本模块上一版清过一次），
+                //   把入参压成 0 反而使条件不成立，整块被跳过：
+                //   Secure 不用写是对的，但 t3() 也不会执行，
+                //   桌面图标上那个角标就永远停在旧值 1。
+                //   这正是「设置页红点没了、桌面图标还有」的原因。
+                //   所以在 proceed 之后再补一次写角标，把这条路补齐。
+                if (args.length == 2 && args[0] instanceof Context) {
+                    clearLauncherBadge((Context) args[0]);
+                }
+                return ret;
             });
             log(Log.INFO, TAG, "已挂 " + Const.CLS_PKG_TYPE + ".V6(Context,int)，"
-                    + Const.KEY_HN_NEW_SYSTEM_UPDATE + " 将恒为 0");
+                    + Const.KEY_HN_NEW_SYSTEM_UPDATE + " 与桌面角标将恒为 0");
             return true;
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + ".V6 失败: " + t);
             return false;
+        }
+    }
+
+    /**
+     * 把桌面「设置」图标的角标清零。
+     *
+     * ── 为什么不用 ContentResolver.update/delete ──
+     *   badge 表虽有 content://com.android.badge/badge 这个读取口，
+     *   但 update 过去返回 0 行（provider 不把写权限放给 update），
+     *   delete 同理。荣耀只开放了 call() 这一个写入口，方法名
+     *   change_badge、带 package/class/badgenumber 三个 extra，
+     *   也就是 OUC 自己 t3() 用的那条路。这里照原样调。
+     *
+     * ── 为什么按 (package, class) 精确写，不是整表清 ──
+     *   同一张表还存着 30 多个应用的角标（应用市场 224、QQ 25、
+     *   小红书 46…），整表清会把它们的角标一起抹掉。这里只写
+     *   com.android.settings + HWSettings 这一行，其余不受影响。
+     */
+    private void clearLauncherBadge(Context ctx) {
+        try {
+            Bundle b = new Bundle();
+            b.putString("package", Const.PKG_SETTINGS);
+            b.putString("class", Const.CLS_SETTINGS_ENTRY);
+            b.putInt("badgenumber", Const.NO_NEW_UPDATE);
+            Bundle r = ctx.getContentResolver().call(
+                    Uri.parse(Const.URI_LAUNCHER_BADGE),
+                    Const.MTH_CHANGE_BADGE, "", b);
+            log(Log.INFO, TAG, "桌面角标已清零: " + (r == null ? "null" : r.getString("result")));
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "清桌面角标失败: " + t);
         }
     }
 

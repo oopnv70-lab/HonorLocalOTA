@@ -110,15 +110,53 @@ final class SwitchStore {
      */
     static String clearRedDot() {
         String cur = RootShell.run("settings get secure " + Const.KEY_HN_NEW_SYSTEM_UPDATE).text;
-        if (cur != null && cur.trim().equals(String.valueOf(Const.NO_NEW_UPDATE))) {
+        boolean secureCleared = cur != null
+                && cur.trim().equals(String.valueOf(Const.NO_NEW_UPDATE));
+        if (!secureCleared) {
+            RootShell.Out o = RootShell.run("settings put secure "
+                    + Const.KEY_HN_NEW_SYSTEM_UPDATE + " " + Const.NO_NEW_UPDATE);
+            if (!o.ok()) {
+                return "红点未清零（" + o.text.trim() + "）";
+            }
+        }
+        // 桌面图标那个角标和上面这个 Secure 键是两条独立的链路：
+        // 桌面读的是 launcher.db 的 badge 表，由 OUC 的 t3() 经
+        // ContentResolver.call(..., "change_badge", ...) 写进去。
+        // 所以这里必须再走一次同样的 call，否则会出现
+        // 「设置页没红点了、桌面图标还挂着角标」。
+        return clearLauncherBadge();
+    }
+
+    /**
+     * 清掉桌面「设置」图标的角标（只动这一行）。
+     *
+     * ── 为什么通过 su 调 content 命令 ──
+     *   OUC 是以 platform_app 身份调 LauncherProvider 的 change_badge，
+     *   但本模块 App 是普通应用，没有该 provider 的调用权限；
+     *   而 content 命令跑在 root 域，可以直接 call 过去。
+     *   命令里的额外参数用 --extra package:s:... 的形式传，
+     *   值里不含空格，不需要转义。
+     *
+     * ── 只改设置这一行 ──
+     *   加 --extra 三个键就等于按 (package, class) 定位，
+     *   provider 只更新匹配的那一行；表里其它应用的角标不受影响。
+     *
+     * @return null 表示成功，否则是错误描述
+     */
+    private static String clearLauncherBadge() {
+        String cmd = "content call"
+                + " --uri " + Const.URI_LAUNCHER_BADGE
+                + " --method " + Const.MTH_CHANGE_BADGE
+                + " --extra package:s:" + Const.PKG_SETTINGS
+                + " --extra class:s:" + Const.CLS_SETTINGS_ENTRY
+                + " --extra badgenumber:i:" + Const.NO_NEW_UPDATE;
+        RootShell.Out o = RootShell.run(cmd);
+        // provider 成功时返回 Result: Bundle[{result=update badge table success}]，
+        // 因此除了退出码，还要看回包里有没有 success，避免「命令跑通但没写进去」。
+        if (o.ok() && o.text.contains("success")) {
             return null;
         }
-        RootShell.Out o = RootShell.run("settings put secure "
-                + Const.KEY_HN_NEW_SYSTEM_UPDATE + " " + Const.NO_NEW_UPDATE);
-        if (o.ok()) {
-            return null;
-        }
-        return "红点未清零（" + o.text.trim() + "）";
+        return "桌面角标未清零（" + o.text.trim() + "）";
     }
 
     /** 开关文件当前是否存在（按本进程能否看到判断，仅作界面参考）。 */
