@@ -6,12 +6,16 @@
       模块本体是 LSPosed 插件，界面盖在 com.hihonor.ouc 的进程里：
          · hook K / ActivityResult → 把「本地更新」入口投放到三点菜单
          · hook l5.b.p() → 按开关决定是否把检查更新压成「无新版本」
-      同时提供一个桌面入口 SettingsActivity，用来开关「屏蔽系统更新」。
+         · hook r9.w1.x2() → 按开关强制向服务器请求全量包
+      同时提供一个桌面入口 SettingsActivity，用来开关上面三项里的后两项。
 
-      不需要任何权限：
-         · 没有存储权限——开关文件写在 /data/local_ota/（0777），
-           本模块 uid 可直接读写，实测 rc=0。
-         · 面板选包走系统 SAF，也不占存储权限。
+      关于权限，这里必须说清楚，别再被旧注释误导：
+         · 开关文件在 /data/local_ota/，标签 local_ota_file，策略里
+           只有 adbd / platform_app_all / shell / update_engine 四个域被放行。
+         · OUC 进程是 platform_app_all，在放行名单里，直接读写即可。
+         · 本模块 App 跑在 untrusted_app，不在名单里，连 getattr 都没有。
+           所以设置页必须经 su 访问（见 RootShell.java），因此需要 root。
+         · 面板选包走系统 SAF，不需要任何存储权限。
     -->
 
     <application
