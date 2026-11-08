@@ -118,6 +118,35 @@ final class Const {
      */
     static final String MTH_BADGE = "setBadgeVisible";
 
+    // ─────────────── 红点真正的来源 ───────────────
+
+    /**
+     * 系统设置页那个红点的数据源键名（Settings.Secure）。
+     *
+     * ── 链路（已在本机逐环读代码确认）──
+     *   写入方：com.hihonor.ouc 的 r9.w1.V6(Context,int)
+     *     Settings.Secure.putInt(cr, "hn_new_system_update", n)
+     *   读取方：com.android.settings 的 dashboard.r0.b()
+     *     Settings.Secure.getInt(cr, ..., 0) → SystemUpdatePreference.Q(n)
+     *     → onBindViewHolder 里 n > 0 就 setVisibility(VISIBLE)
+     *
+     *   所以这个红点根本不在 OUC 进程里画，HnEventBadgeView 对它无效。
+     *   在原版里 n 是"新版本条数"，0 表示无新版本，D3() 安装完成后
+     *   也调 V6(ctx, 0) 清零，语义与官方用法一致。
+     *
+     * 实测本机 com.android.settings 14.0.0.210 对应
+     *   id update_count (0x7f0a0fbc)，类 HwTextView，text 为 n。
+     */
+    static final String KEY_HN_NEW_SYSTEM_UPDATE = "hn_new_system_update";
+
+    /**
+     * 直接压掉红点，而不是去改其它数据。
+     *
+     * 参数是"新版本条数"，任何 > 0 的值都会让设置页显示红点，
+     * 所以这里给 0。
+     */
+    static final int NO_NEW_UPDATE = 0;
+
     private Const() {
     }
 }

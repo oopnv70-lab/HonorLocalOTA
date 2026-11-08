@@ -439,6 +439,16 @@ public class SettingsActivity extends Activity {
         blockSwitch.setEnabled(false);
         new Thread(() -> {
             final String err = SwitchStore.setBlockUpdate(on);
+            if (err == null && on) {
+                // 打开屏蔽时顺手把设置页那个红点清零。
+                // hook 只在 OUC 下次写 Secure 表时生效，而键里若已留着旧值，
+                // 用户会一直看到红点、误以为没生效。这里主动清一次。
+                // 失败不算保存失败：hook 仍会拦住后续写入，只是晚一点。
+                final String dot = SwitchStore.clearRedDot();
+                if (dot != null) {
+                    ui.post(() -> toast(dot));
+                }
+            }
             finishSave(err, "屏蔽系统更新");
         }, "settings-save-block").start();
     }

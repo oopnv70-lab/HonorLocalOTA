@@ -102,7 +102,8 @@ public class OtaHook extends XposedModule {
         //   hookK/hookActivityResult → 本地更新入口（面板投放）
         //   hookCheckSum             → 关掉「检查更新」的新版本提示
         //   hookPackageType          → 强制向服务器要全量包
-        //   hookBadge                → 不显示红点
+        //   hookBadge                → OUC 自己界面内的角标
+        //   hookBadgeCount           → 设置页那个红点（写 Secure 表时压成 0）
         boolean k = hookK(cl);
         if (k) {
             hookActivityResult();
@@ -112,8 +113,9 @@ public class OtaHook extends XposedModule {
         boolean s = hookCheckSum(cl);
         boolean f = hookPackageType(cl);
         boolean b = hookBadge(cl);
+        boolean c = hookBadgeCount(cl);
 
-        if (k || s || f || b) {
+        if (k || s || f || b || c) {
             hooked = true;
         }
     }
@@ -336,6 +338,71 @@ public class OtaHook extends XposedModule {
         } catch (Throwable t) {
             // 挂不上只是没有全量包功能，不影响已经工作的屏蔽与本地更新。
             log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + "." + Const.MTH_PKG_TYPE + " 失败: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 挂 r9.w1.V6(Context,int)，把写进 Settings.Secure 的「新版本条数」压成 0。
+     *
+     * ── 为什么必须有这个 hook ──
+     *   实测那个红点在 com.android.settings 里，不在 OUC 进程里：
+     *     活动：Settings$HwSystemDashboardActivity
+     *     控件：id update_count (0x7f0a0fbc)，类 HwTextView，text 为 1
+     *   它读的是 Settings.Secure 的 hn_new_system_update，读代码已确认：
+     *     com.android.settings.dashboard.r0.b()
+     *       getInt(cr, "hn_new_system_update", 0) -> SystemUpdatePreference.Q(n)
+     *       -> onBindViewHolder 里 n > 0 就把 FrameLayout 设为 VISIBLE
+     *   而写这个键的只有一处，就是本进程的 r9.w1.V6(Context,int)：
+     *     Settings.Secure.putInt(cr, "hn_new_system_update", n)
+     *     再发广播 com.hihonor.android.hnouc.HW_NEW_SYSTEM_UPDATE
+     *   所以哪怕 OUC 自己界面的角标全压掉了，只要这个键不是 0，
+     *   设置页那个红点就一直在。上一版只挂了 HnEventBadgeView，
+     *   对它无效，就是因为两者根本不在同一个进程里。
+     *
+     * ── 为什么不挂 Settings.Secure.putInt ──
+     *   那会把 OUC 里所有 Secure 写入都拦下来，还要按 key 字符串区分，
+     *   范围太大。V6 的入参语义就是「新版本条数」，是最小改动面。
+     *
+     * ── 为什么改参数而不是拦掉整个方法 ──
+     *   V6 除了写 Secure，还负责「值变了才发广播」以及 d0() 成立时走 t3()。
+     *   直接 return 会把这些副作用一起吞掉，留下「Secure 是 0、
+     *   但内部仍认为有更新」的不一致。把入参改成 0 再放行，其余逻辑照跑。
+     *   它内部有 if (i2 != X1(q)) 的比较：改成 0 后若原值已是 0 就整体
+     *   跳过，正好不会乱发广播。
+     *
+     * ── 语义安全性 ──
+     *   0 表示「无新版本」，这是原版自己的用法：
+     *   r9.w1.D3() 在安装完成后就调 V6(ctx, 0) 清零，
+     *   并且 D3() 里还有 if (iX1 == 0) { 不处理 } 的分支。
+     *   所以写 0 不会引入原版不会出现的状态。
+     *
+     * ── 开关 ──
+     *   与其它 hook 共用 isBlockEffective()：屏蔽关掉、或强制全量包
+     *   开着时原样放行，保留真实红点。
+     */
+    private boolean hookBadgeCount(ClassLoader cl) {
+        try {
+            Class<?> w1 = Class.forName(Const.CLS_PKG_TYPE, false, cl);
+            Method v6 = w1.getDeclaredMethod("V6", Context.class, int.class);
+            v6.setAccessible(true);
+            hook(v6).intercept(chain -> {
+                if (!SwitchStore.isBlockEffective()) {
+                    return chain.proceed();
+                }
+                Object[] args = chain.getArgs().toArray();
+                if (args.length == 2 && args[1] instanceof Integer
+                        && ((Integer) args[1]) != Const.NO_NEW_UPDATE) {
+                    log(Log.INFO, TAG, "红点计数 " + args[1] + " -> " + Const.NO_NEW_UPDATE);
+                    args[1] = Const.NO_NEW_UPDATE;
+                }
+                return chain.proceed(args);
+            });
+            log(Log.INFO, TAG, "已挂 " + Const.CLS_PKG_TYPE + ".V6(Context,int)，"
+                    + Const.KEY_HN_NEW_SYSTEM_UPDATE + " 将恒为 0");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + ".V6 失败: " + t);
             return false;
         }
     }

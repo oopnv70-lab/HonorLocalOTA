@@ -84,6 +84,43 @@ final class SwitchStore {
         return isBlockUpdate() && !isForceFullPackage();
     }
 
+    /**
+     * 把设置页那个红点的数据源清零（Settings.Secure 的 hn_new_system_update）。
+     *
+     * ── 为什么需要这一步 ──
+     *   红点的读方是 com.android.settings：dashboard.r0 用 ContentObserver
+     *   盯着这个键，值一变就刷新 SystemUpdatePreference 的角标。
+     *   写方只有 OUC 的 r9.w1.V6()，模块靠 hook 它把值压成 0。
+     *
+     *   但 hook 只在「OUC 下次写」的时候生效。如果模块装好时这个键
+     *   已经是 1（旧版本留下的，或者屏蔽开关关着的时候收到的更新），
+     *   那么要等到 OUC 再检查一次更新才会被清零——用户在这段时间里
+     *   依旧会看到红点，很容易误判成"没生效"。
+     *   所以打开屏蔽开关时顺手清一次，让设置页立刻同步。
+     *
+     * ── 为什么要 root ──
+     *   WRITE_SECURE_SETTINGS 是 signature|privileged 权限，
+     *   本模块 App 是普通应用，写不了。走 su 调 settings 命令即可。
+     *
+     * ── 失败不算错 ──
+     *   清不掉只是"红点晚一点消失"，hook 仍然会在 OUC 下次写入时压住它。
+     *   所以这里不把失败上报成开关保存失败，只作为提示。
+     *
+     * @return null 表示已清零或本来就已是 0，否则是错误描述
+     */
+    static String clearRedDot() {
+        String cur = RootShell.run("settings get secure " + Const.KEY_HN_NEW_SYSTEM_UPDATE).text;
+        if (cur != null && cur.trim().equals(String.valueOf(Const.NO_NEW_UPDATE))) {
+            return null;
+        }
+        RootShell.Out o = RootShell.run("settings put secure "
+                + Const.KEY_HN_NEW_SYSTEM_UPDATE + " " + Const.NO_NEW_UPDATE);
+        if (o.ok()) {
+            return null;
+        }
+        return "红点未清零（" + o.text.trim() + "）";
+    }
+
     /** 开关文件当前是否存在（按本进程能否看到判断，仅作界面参考）。 */
     static boolean exists() {
         try {
