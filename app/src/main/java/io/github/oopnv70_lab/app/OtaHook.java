@@ -46,6 +46,15 @@ import io.github.libxposed.api.XposedModuleInterface;
  *   决定服务器回全量包还是增量包。这一条替代了社区里
  *   "反复清数据卡全量包"的试错做法，原因见 hookPackageType 的注释。
  *
+ * 五、把检查更新请求发到正式版本组（hookCheckGroup）
+ *   拦 l5.b.R(DependCheckInfo)，开关开启时把 subGroup/verGroup
+ *   强制写成 PHASE03/SERVICE。这是「开了全量包却收不到更新」的根治点，
+ *   详见 hookCheckGroup 的注释。
+ *
+ * 六、屏蔽生效时让尝鲜页不显示新版本（hookTrialVersion）
+ *   拦 qg.g.l0(...)，把状态码强制成 10（无尝鲜活动）。
+ *   「升级尝鲜」是独立通路，不经过 p()，必须单独处理。
+ *
  * ── 已经删除的功能：版本伪造 ──
  *   曾实现过两套：hook SystemPropertiesEx.get(String,String) 改上报值、
  *   反射改 Build.DISPLAY 改界面显示。两者都实测生效（日志 113+ 次命中、
@@ -107,10 +116,12 @@ public class OtaHook extends XposedModule {
         ClassLoader cl = param.getClassLoader();
         log(Log.INFO, TAG, "onPackageReady: " + param.getPackageName());
 
-        // 四件事互相独立，不能因为一件挂不上就放弃其余：
+        // 六件事互相独立，不能因为一件挂不上就放弃其余：
         //   hookK/hookActivityResult → 本地更新入口（面板投放）
         //   hookCheckSum             → 关掉「检查更新」的新版本提示
         //   hookPackageType          → 强制向服务器要全量包
+        //   hookCheckGroup           → 把请求发到正式版本组（全量包收不到更新的根治点）
+        //   hookTrialVersion         → 屏蔽生效时尝鲜页不显示新版本
         //   hookBadge                → OUC 自己界面内的角标
         //   hookBadgeCount           → 设置页那个红点（写 Secure 表时压成 0）
         boolean k = hookK(cl);
@@ -121,10 +132,12 @@ public class OtaHook extends XposedModule {
         }
         boolean s = hookCheckSum(cl);
         boolean f = hookPackageType(cl);
+        boolean g = hookCheckGroup(cl);
+        boolean t = hookTrialVersion(cl);
         boolean b = hookBadge(cl);
         boolean c = hookBadgeCount(cl);
 
-        if (k || s || f || b || c) {
+        if (k || s || f || g || t || b || c) {
             hooked = true;
         }
     }
@@ -347,6 +360,172 @@ public class OtaHook extends XposedModule {
         } catch (Throwable t) {
             // 挂不上只是没有全量包功能，不影响已经工作的屏蔽与本地更新。
             log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + "." + Const.MTH_PKG_TYPE + " 失败: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 挂 l5.b.R(DependCheckInfo)，把检查更新请求发到正式版本组。
+     *
+     * ── 这是「开了全量包却收不到更新」的真正根治点 ──
+     *   OUC 在构造请求体时决定问哪个版本组，代码只有这一处：
+     *
+     *     public void R(DependCheckInfo dependCheckInfo) {
+     *         if (t() || !HnOucApplication.z().i0()) {
+     *             dependCheckInfo.setSubGroup(BetaUtil.e());  // 尝鲜组
+     *             dependCheckInfo.setVerGroup(BetaUtil.f());
+     *         } else {
+     *             dependCheckInfo.setSubGroup("PHASE03");     // 正式发布组
+     *             dependCheckInfo.setVerGroup("SERVICE");
+     *         }
+     *     }
+     *
+     *   它被 DependCheckInfo 的构造函数最后一行调用（bVar.R(this)），
+     *   所以每个检查请求在出生那一刻版本组就定了，后面没有第二次机会。
+     *
+     * ── 两个输入变量的实测取值 ──
+     *   t()  = l5.b.f16686p，由 M(boolean) 写入，默认 false。
+     *          手动检查走 o5.c.D()，那里是 M(false) → t() 恒为 false。
+     *   i0() = x9.b.C，private boolean C = false，纯内存字段，
+     *          全类没有任何 putBoolean 涉及它，进程重启即复位。
+     *          只有两处会置 true：
+     *            · kg.q.f0() 第 557 行 t4(true) —— 进「升级尝鲜」页时
+     *            · ja.m.h()   t4(true)        —— YOYO 语音查系统版本时
+     *
+     *   于是默认 t()==false 且 i0()==false，条件成立，走尝鲜组分支。
+     *   而本机 files/profile.xml 不存在，BetaUtil.e()/f() 均返回空串，
+     *   等于把空的 subGroup/verGroup 发出去，服务器不回正式版全量包，
+     *   界面显示「当前已是最新版本」。
+     *
+     *   必须先点一次「升级尝鲜」把 C 置 true，之后 t()|!i0() 才不成立、
+     *   走 else 分支写正式组——这就是用户观察到的
+     *   「必须先去尝鲜，更新里才能找到最新版本」。
+     *
+     * ── 为什么直接改对象，而不是改返回值 ──
+     *   R() 返回 void，且是在构造函数内部被调用，没有返回值可改。
+     *   唯一作用点就是它收到的那个 DependCheckInfo。
+     *
+     * ── 顺序：先 proceed，再改写 ──
+     *   原版 R() 只会写这两个字段，没有别的副作用。所以先让它按自己
+     *   的逻辑写一遍（尝鲜值或空串），再把这两个字段覆盖成正式组。
+     *   这样不依赖「原版到底写了 null 还是空串」，最终值一定是
+     *   PHASE03/SERVICE；而请求体是在 R() 返回之后才发出去的，
+     *   覆盖发生在这个时点之前，一定赶得上。
+     *
+     *   之所以不反过来（先改再 proceed）：proceed 会原版覆盖我们的值，
+     *   等于白改。
+     *
+     * ── 开关 ──
+     *   受「强制全量包」开关控制。用户开这个开关的目的就是「要全量包」，
+     *   版本组和包类型必须一起改，只改 x2() 不改版本组等于问错了地方。
+     */
+    private boolean hookCheckGroup(ClassLoader cl) {
+        try {
+            Class<?> base = Class.forName(CLS_CHECK_BASE, false, cl);
+            Class<?> info = Class.forName(Const.CLS_DEPEND_CHECK_INFO, false, cl);
+            Method r = base.getDeclaredMethod(Const.MTH_CHECK_GROUP, info);
+
+            // 两个 setter 是 public 的普通 POJO 方法，直接取来用，
+            // 避免每次调用都做反射查找。
+            final Method setSub = info.getMethod("setSubGroup", String.class);
+            final Method setVer = info.getMethod("setVerGroup", String.class);
+
+            hook(r).intercept(chain -> {
+                Object ret = chain.proceed();   // 先让原版按它自己的逻辑写一遍
+                if (!SwitchStore.isForceFullPackage()) {
+                    return ret;                 // 开关关着，不干预原版取值
+                }
+                Object arg = chain.getArg(0);
+                if (arg != null) {
+                    try {
+                        setSub.invoke(arg, Const.VER_GROUP_SUB);
+                        setVer.invoke(arg, Const.VER_GROUP_VER);
+                        log(Log.INFO, TAG, "版本组已改为 "
+                                + Const.VER_GROUP_SUB + "/" + Const.VER_GROUP_VER);
+                    } catch (Throwable t) {
+                        log(Log.ERROR, TAG, "改写版本组失败: " + t);
+                    }
+                }
+                return ret;
+            });
+
+            log(Log.INFO, TAG, "已挂 " + CLS_CHECK_BASE + "." + Const.MTH_CHECK_GROUP
+                    + "()，全量包模式将请求正式版本组");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 " + CLS_CHECK_BASE + "." + Const.MTH_CHECK_GROUP + " 失败: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 挂 qg.g.l0(int,int,String,String)，屏蔽生效时让尝鲜页不显示新版本。
+     *
+     * ── 为什么尝鲜必须单独处理 ──
+     *   「升级尝鲜」是一条完全独立的数据通路，从不经过 l5.b.p()：
+     *
+     *     TrialVersionActivity
+     *       └ y() → new kg.q(this, new qg.g(this), new eg.b())
+     *           └ eg.b.b() → eg.b.f()  直接打 checkBetaActivities 接口
+     *               └ kg.q.A0(code, regStatus, str, osVer)
+     *                   └ runOnUiThread → qg.g.l0(code, ...)
+     *
+     *   它自己发 HTTP、自己判状态、自己渲染。现有三个 hook
+     *   （p() 压标志位、x2() 改包类型、V6() 压角标）一个都碰不到它，
+     *   所以会出现「屏蔽开着，尝鲜页里却还显示有新版本」。
+     *
+     * ── 为什么挂渲染层而不是拦请求 ──
+     *   拦请求（eg.b.f）要构造 BetaTestActivityInfo 或改变回调时序，
+     *   侵入性强、还依赖网络层对象；而 l0() 是最终的渲染出口，
+     *   参数就是状态码，语义单一（10 = 无尝鲜活动），
+     *   改成 10 之后原版自己会去 setText(card_status_no_beta_test)
+     *   并把按钮设成「重新检查」，不引入任何原版不存在的状态。
+     *
+     * ── 状态码语义（从 qg.g.l0 逐个读出）──
+     *   10 = 无尝鲜活动 → card_status_no_beta_test + card_btn_recheck
+     *   11 = 可报名     → card_btn_to_register
+     *   12 = 检查中     → card_btn_checking，按钮置灰
+     *   13 = 已报名     → card_btn_details
+     *
+     * ── 为什么不是砍掉入口 ──
+     *   用户要的是「看不到最新版本，也不显示有最新版本」，
+     *   不是「把入口去掉」。保留入口、显示「暂无尝鲜活动」，
+     *   既满足诉求，又不改变系统原貌。
+     *
+     * ── 开关 ──
+     *   与 p()/V6() 共用 isBlockEffective()：屏蔽关掉或强制全量包开着时
+     *   原样放行，尝鲜页恢复真实内容。
+     */
+    private boolean hookTrialVersion(ClassLoader cl) {
+        try {
+            Class<?> view = Class.forName(Const.CLS_TRIAL_VIEW, false, cl);
+            Method l0 = view.getDeclaredMethod(Const.MTH_TRIAL_RENDER,
+                    int.class, int.class, String.class, String.class);
+            l0.setAccessible(true);
+
+            hook(l0).intercept(chain -> {
+                if (!SwitchStore.isBlockEffective()) {
+                    return chain.proceed();
+                }
+                Object[] a = chain.getArgs().toArray();
+                if (a.length == 4 && a[0] instanceof Integer
+                        && ((Integer) a[0]) != Const.TRIAL_STATUS_NONE) {
+                    log(Log.INFO, TAG, "尝鲜状态 " + a[0] + " -> " + Const.TRIAL_STATUS_NONE);
+                    a[0] = Const.TRIAL_STATUS_NONE;
+                    // 只改状态码，不动 str/str2。原因：
+                    // l0() 里 status==10 走的是 i10 != 13 那条兜底分支，
+                    // 只 setText(card_status_no_beta_test) 和
+                    // setText(card_btn_recheck)，完全不读 str/str2。
+                    // 多传 null 属于无谓改动，不做。
+                }
+                return chain.proceed(a);
+            });
+
+            log(Log.INFO, TAG, "已挂 " + Const.CLS_TRIAL_VIEW + "." + Const.MTH_TRIAL_RENDER
+                    + "()，屏蔽生效时尝鲜将显示无活动");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 " + Const.CLS_TRIAL_VIEW + "." + Const.MTH_TRIAL_RENDER + " 失败: " + t);
             return false;
         }
     }

@@ -93,6 +93,89 @@ final class Const {
     /** 全量包。 */
     static final String PKG_TYPE_RECOVERY = "recovery";
 
+    // ─────────────── 服务器版本组 ───────────────
+
+    /**
+     * 检查更新请求体里决定「问哪个版本组」的类。
+     *
+     * 这个类没有被混淆，全名可以直接用：
+     *   source: com/hihonor/android/hnouc/check/model/checkinfo/DependCheckInfo.java
+     * 它在构造函数最后一行回调 bVar.R(this)，把版本组写进请求体：
+     *   this.checkMode = bVar;
+     *   commonParaInit();
+     *   bVar.R(this);
+     */
+    static final String CLS_DEPEND_CHECK_INFO =
+            "com.hihonor.android.hnouc.check.model.checkinfo.DependCheckInfo";
+
+    /**
+     * 写版本组的方法（在 l5.b 里定义），签名 (DependCheckInfo)V。
+     *
+     * ── 为什么必须挂这里 ──
+     *   OUC 的检查更新请求，在构造请求体的那一刻就要决定问哪个版本组：
+     *
+     *     if (t() || !HnOucApplication.z().i0()) {
+     *         setSubGroup(BetaUtil.e());   // 尝鲜组
+     *         setVerGroup(BetaUtil.f());
+     *     } else {
+     *         setSubGroup("PHASE03");      // 正式发布组
+     *         setVerGroup("SERVICE");
+     *     }
+     *
+     *   t() 是本次检查的模式标志：手动检查走 o5.c.D()，那里写的是 M(false)，
+     *   所以手动检查时 t() 恒为 false。
+     *   i0() 读的是 x9.b 的 private boolean C，默认 false，且是纯内存字段
+     *   （不落盘、无 putBoolean），只有进过一次「升级尝鲜」页
+     *   （kg.q.f0() 里 t4(true)）或走过 YOYO 语音查版本才会变 true。
+     *
+     *   于是默认情况下 t()==false 且 i0()==false，请求落到尝鲜组；
+     *   而本机 files/profile.xml 并不存在，BetaUtil.e()/f() 都返回空串，
+     *   等于发一个空版本组出去，服务器不会回正式版全量包，
+     *   界面就显示「当前已是最新版本」。
+     *
+     *   这就是「开了全量包却收不到更新、必须先进一次尝鲜」的真正原因。
+     *   挂在这里强制写成正式组，才能让 check 更新直接拿到最新版本。
+     */
+    static final String MTH_CHECK_GROUP = "R";
+
+    /** 正式发布组的 subGroup。 */
+    static final String VER_GROUP_SUB = "PHASE03";
+
+    /** 正式发布组的 verGroup。 */
+    static final String VER_GROUP_VER = "SERVICE";
+
+    // ─────────────── 升级尝鲜 ───────────────
+
+    /**
+     * 尝鲜页的 View 实现类，source: TrialVersionView.java。
+     *
+     * 「升级尝鲜」是一条完全独立的数据通路，不经过 l5.b.p()：
+     *   TrialVersionActivity
+     *     └ y() → new kg.q(this, new qg.g(this), new eg.b())
+     *         └ eg.b.b() → eg.b.f() 直接打 checkBetaActivities 接口
+     *             └ kg.q.A0(code, regStatus, str, osVer)
+     *                 └ qg.g.l0(code, ...)   ← 渲染
+     * 所以压 p() 的 8 个标志位对它毫无影响，这就是「屏蔽开着、
+     * 尝鲜页里却还显示有新版本」的原因。
+     */
+    static final String CLS_TRIAL_VIEW = "qg.g";
+
+    /** 尝鲜页的渲染方法，签名 (IILjava/lang/String;Ljava/lang/String;)V。 */
+    static final String MTH_TRIAL_RENDER = "l0";
+
+    /**
+     * 尝鲜状态码：无尝鲜活动。
+     *
+     * qg.g.l0() 的状态码语义（从反编译代码逐个读出）：
+     *   10 = 无尝鲜活动 → card_status_no_beta_test + card_btn_recheck
+     *   11 = 可报名     → card_btn_to_register
+     *   12 = 检查中     → card_btn_checking，按钮置灰
+     *   13 = 已报名     → card_btn_details
+     * 屏蔽生效时强制成 10，页面显示「暂无尝鲜活动」，
+     * 入口保留但不会出现任何新版本条目。
+     */
+    static final int TRIAL_STATUS_NONE = 10;
+
     // ─────────────── 红点 ───────────────
     /**
      * 红点（角标）的绘制开关类。
