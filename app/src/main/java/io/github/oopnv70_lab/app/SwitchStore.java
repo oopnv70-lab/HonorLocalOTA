@@ -261,7 +261,7 @@ final class SwitchStore {
      */
     private static String writeKey(String key, String value) {
         StringBuilder sb = new StringBuilder();
-        sb.append("# 系统包投放模块开关。改完立刻生效，不需要重启「软件更新」。\n");
+        sb.append("# 软件更新增强模块开关。改完立刻生效，不需要重启「软件更新」。\n");
 
         // 已有的其它键原样保留
         String old = readAll();

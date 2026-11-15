@@ -33,11 +33,6 @@ import android.widget.Toast;
  *   SwitchStore.isBlockEffective() = 屏蔽 && !全量包，界面在旁边
  *   标一句「已被覆盖」。这样没有状态需要回滚，也不会出现
  *   两个键写同一文件的中途态。理由详见 SwitchStore.isBlockEffective()。
- *
- * ── 为什么「本地更新」只有说明没有开关 ──
- *   面板（PanelView）是挂到 OUC 界面上的，只要 hook 挂上就存在，
- *   没有需要用户配置的东西。它的状态由 LSPosed 是否启用模块决定，
- *   在这之前加一个本模块自己的开关只会造成「开着但没生效」的困惑。
  */
 public class SettingsActivity extends Activity {
 
@@ -83,7 +78,7 @@ public class SettingsActivity extends Activity {
         page.setBackgroundColor(theme.background);
 
         // ── 页头 ──
-        TextView title = theme.title(this, "系统包投放");
+        TextView title = theme.title(this, "软件更新增强");
         page.addView(title, theme.matchWrap());
 
         TextView sub = theme.text(this, "荣耀「软件更新」增强模块", 14, theme.onSurfaceVariant);
@@ -96,13 +91,10 @@ public class SettingsActivity extends Activity {
         // ── 卡片二：强制全量包 ──
         page.addView(buildFullCard(), theme.gaps(this, 14, 0));
 
-        // ── 卡片三：本地更新 ──
-        page.addView(buildLocalCard(), theme.gaps(this, 14, 0));
-
-        // ── 卡片四：重启「软件更新」 ──
+        // ── 卡片三：重启「软件更新」 ──
         page.addView(buildRestartCard(), theme.gaps(this, 14, 0));
 
-        // ── 卡片五：状态 ──
+        // ── 卡片四：状态 ──
         page.addView(buildStatusCard(), theme.gaps(this, 14, 0));
 
         ScrollView sv = new ScrollView(this);
@@ -119,7 +111,7 @@ public class SettingsActivity extends Activity {
         root.setFitsSystemWindows(true);
 
         setContentView(root);
-        setTitle("系统包投放");
+        setTitle("软件更新增强");
 
         reload();
     }
@@ -239,28 +231,6 @@ public class SettingsActivity extends Activity {
         return row;
     }
 
-    // ─────────────── 卡片：本地更新 ───────────────
-
-    private LinearLayout buildLocalCard() {
-        LinearLayout card = theme.card(this);
-
-        card.addView(theme.sectionTitle(this, "本地更新"), theme.matchWrap());
-
-        TextView name = theme.text(this, "从本地安装包升级", 17, theme.onSurface);
-        name.setTypeface(android.graphics.Typeface.create(
-                "sans-serif-medium", android.graphics.Typeface.NORMAL));
-        card.addView(name, theme.gaps(this, 14, 0));
-
-        TextView desc = theme.text(this,
-                "打开「软件更新」，点右上角三点菜单 → 本地更新，即可选一个 update.zip "
-                        + "交给原版的安装流程。这个入口不占用安装包扫描目录之外的任何权限。",
-                13, theme.onSurfaceVariant);
-        desc.setLineSpacing(Theme.dp(this, 3), 1f);
-        card.addView(desc, theme.gaps(this, 10, 0));
-
-        return card;
-    }
-
     // ─────────────── 卡片：重启「软件更新」 ───────────────
 
     /**
@@ -270,7 +240,7 @@ public class SettingsActivity extends Activity {
      *   两个开关是「读时生效」的（SwitchStore 每次都真读文件，没有缓存），
      *   所以单纯改开关并不需要重启。会用到重启的是这两种情况：
      *     · 刚在 LSPosed 里启用/更新模块 —— hook 只在 OUC 进程启动时挂载，
-     *       旧进程还带着旧代码，三点菜单里看不到本地更新入口；
+     *       旧进程还带着旧代码；
      *     · OUC 界面状态卡住。
      *   界面上必须把这点写清楚，否则用户会以为所有改动都要点一次重启。
      */
@@ -285,8 +255,8 @@ public class SettingsActivity extends Activity {
         card.addView(desc, theme.gaps(this, 12, 0));
 
         TextView when = theme.text(this,
-                "什么时候用：刚在 LSPosed 里启用或更新了本模块，但「软件更新」的"
-                        + "三点菜单里看不到本地更新入口；或者它的界面卡住了。"
+                "什么时候用：刚在 LSPosed 里启用或更新了本模块；"
+                        + "或者「软件更新」的界面卡住了。"
                         + "两个开关是即时生效的，改开关不需要点这里。",
                 12, theme.onSurfaceVariant);
         when.setLineSpacing(Theme.dp(this, 3), 1f);

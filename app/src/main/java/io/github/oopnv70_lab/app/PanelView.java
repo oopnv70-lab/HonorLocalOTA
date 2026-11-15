@@ -60,7 +60,7 @@ final class PanelView extends FrameLayout {
         setClickable(true); // 吃掉背景点击，避免透传到下面的列表
 
         TextView title = new TextView(activity);
-        title.setText("系统包投放");
+        title.setText("本地更新");
         title.setTextSize(20);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(56, 64, 56, 24);
