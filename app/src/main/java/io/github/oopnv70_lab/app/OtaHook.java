@@ -191,10 +191,10 @@ public class OtaHook extends XposedModule {
                 log(Log.WARN, TAG, "拿不到宿主 APK 路径: " + e);
             }
 
-            // appTag = 包名 + versionCode。
-            // 带版本号是刻意的：升级/降级都会自动切换到独立命名空间，
-            // 不会把旧版本的混淆名拿到新版本上用（那种错误比"找不到"更难查）。
-            String appTag = Const.PKG_OUC + ":" + hostVersionCode(param);
+            // appTag = 包名 + APK 文件指纹。
+            // 换 APK 就换命名空间，不会把旧版本的混淆名拿到新版本上用
+            // （那种错误比"找不到"更难查）。见 hostApkTag 的注释。
+            String appTag = hostApkTag(param);
 
             TargetCache cache = null;
             try {
@@ -226,37 +226,42 @@ public class OtaHook extends XposedModule {
     }
 
     /**
-     * 宿主 versionCode。只用来给定位缓存分命名空间，取不到就是 0，不影响功能。
+     * 宿主 APK 的缓存命名空间标识。
      *
-     * ── 为什么不用 PackageManager ──
-     *   PackageReady 阶段 ActivityThread.currentApplication() 有可能还是 null，
-     *   走 PM 要多一层判空、还多一次 Binder 调用。
-     *   ApplicationInfo 是随参数直接带过来的，够用且零成本。
+     * ── 为什么不用 versionCode ──
+     *   实测在 compileSdk 37 的公开 SDK 里，ApplicationInfo 的
+     *   versionCode（int）与 longVersionCode（long）**都不可见**，
+     *   直接引用编译报 "cannot find symbol"。
+     *   本地用 robolectric android-all 能编过是因为那套 jar 含隐藏 API，
+     *   真实 SDK 不含——这个差异让 CI 才暴露问题。
+     *   换成 PackageInfo.getLongVersionCode() 也能过，但要额外拿
+     *   PackageManager、多一次 Binder 调用，而且在 PackageReady 阶段
+     *   ActivityThread.currentApplication() 可能还是 null。
      *
-     * ── 为什么先试 longVersionCode ──
-     *   ApplicationInfo.versionCode（int）从 API 28 起被标记废弃，
-     *   官方建议改用 longVersionCode（long，同为字段）。
-     *   本模块 minSdk = 26，26/27 上只有 int 字段，
-     *   直接读 long 字段会抛 NoSuchFieldError，所以按版本分支。
-     *   两条路读的是同一个值，只是宽度不同。
+     * ── 为什么 APK 文件指纹反而更对 ──
+     *   这个标识的唯一用途是给定位缓存分命名空间：
+     *   换了 APK 就必须换缓存，否则会把旧版本的混淆名拿到新版本上用。
+     *   文件尺寸 + 修改时间会随 APK 替换而变化，且用的全是
+     *   java.io.File 的公开方法，不依赖任何 Android API 版本语义。
+     *   这比版本号更贴近真实需求：真正要防的是「APK 内容变了」，
+     *   而不是「版本号数字变了」。
+     *
+     * 取不到就返回固定值，退化成「所有版本共用一个命名空间」，
+     * 缓存命中后还有 classExists 复核兜着，不会挂错方法。
      */
-    private long hostVersionCode(XposedModuleInterface.PackageReadyParam param) {
+    private String hostApkTag(XposedModuleInterface.PackageReadyParam param) {
         try {
             ApplicationInfo ai = param.getApplicationInfo();
-            if (ai == null) {
-                return 0L;
+            if (ai != null && ai.sourceDir != null) {
+                java.io.File f = new java.io.File(ai.sourceDir);
+                if (f.isFile()) {
+                    return Const.PKG_OUC + ":" + f.length() + "_" + f.lastModified();
+                }
             }
-            if (android.os.Build.VERSION.SDK_INT >= 28) {
-                return ai.longVersionCode;
-            }
-            @SuppressWarnings("deprecation")
-            int v = ai.versionCode;
-            return v;
         } catch (Throwable ignored) {
-            // 拿不到就是 0，退化成「所有版本共用一个缓存命名空间」，
-            // 每次启动会重查一遍，只是慢一点，不会挂错方法。
-            return 0L;
+            // 见方法头注释：退化到固定 tag 不影响正确性。
         }
+        return Const.PKG_OUC + ":0";
     }
 
     /**
