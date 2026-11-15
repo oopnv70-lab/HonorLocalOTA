@@ -3,6 +3,7 @@ package io.github.oopnv70_lab.app;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
@@ -68,7 +69,14 @@ public class OtaHook extends XposedModule {
 
     private static final String TAG = "HonorLocalOTA";
 
-    /** 混淆后的真实类名，仅对 com.hihonor.ouc 2.1.1.1（versionCode 205）成立。 */
+    /**
+     * 本地更新面板入口的兜底类名。
+     *
+     * ── 这个常量已经降级为「兜底值」──
+     *   实际类名由 TargetResolver 动态定位（见 HookTarget.LOCAL_ENTRY），
+     *   只有动态定位全部失败时才会用到这里。
+     *   当前值在 OUC 18.0.4.120 上仍然存在，所以兜底是可靠的。
+     */
     private static final String CLS_KHL = "kh.l";
 
     /**
@@ -76,10 +84,13 @@ public class OtaHook extends XposedModule {
      *
      * 手动检查走的 l5.d0（NormalMode.java）等 10 个模式类全部继承它，
      * 而 p() 只在这个基类里定义，没有任何子类覆盖。
+     *
+     * 同样已降级为兜底值：CHECK_SUM 与 CHECK_GROUP 两个目标共用这个类，
+     * 实际类名由 TargetResolver 按「持有 DependCheckInfo + ≥8 boolean」定位。
      */
     private static final String CLS_CHECK_BASE = "l5.b";
 
-    /** 汇总方法，签名 ()V，protected。 */
+    /** 汇总方法兜底名，签名 ()V，protected。 */
     private static final String MTH_CHECK_SUM = "p";
 
     /**
@@ -116,6 +127,12 @@ public class OtaHook extends XposedModule {
         ClassLoader cl = param.getClassLoader();
         log(Log.INFO, TAG, "onPackageReady: " + param.getPackageName());
 
+        // ── 动态定位六个目标 ──
+        // 这一步替代了原先写死在常量里的六个混淆名。
+        // 解析器内部按「缓存 → DexKit → 硬编码 → 失败」四级取，
+        // 每个目标独立，任何一个失败都不影响其余。
+        ResolvedTargets rt = resolveTargets(cl, param);
+
         // 六件事互相独立，不能因为一件挂不上就放弃其余：
         //   hookK/hookActivityResult → 本地更新入口（面板投放）
         //   hookCheckSum             → 关掉「检查更新」的新版本提示
@@ -124,21 +141,152 @@ public class OtaHook extends XposedModule {
         //   hookTrialVersion         → 屏蔽生效时尝鲜页不显示新版本
         //   hookBadge                → OUC 自己界面内的角标
         //   hookBadgeCount           → 设置页那个红点（写 Secure 表时压成 0）
-        boolean k = hookK(cl);
+        boolean k = hookK(cl, rt);
         if (k) {
             hookActivityResult();
         } else {
             log(Log.WARN, TAG, "本地更新入口未挂上，但继续尝试关闭检查更新");
         }
-        boolean s = hookCheckSum(cl);
-        boolean f = hookPackageType(cl);
-        boolean g = hookCheckGroup(cl);
-        boolean t = hookTrialVersion(cl);
+        boolean s = hookCheckSum(cl, rt);
+        boolean f = hookPackageType(cl, rt);
+        boolean g = hookCheckGroup(cl, rt);
+        boolean t = hookTrialVersion(cl, rt);
         boolean b = hookBadge(cl);
-        boolean c = hookBadgeCount(cl);
+        boolean c = hookBadgeCount(cl, rt);
 
         if (k || s || f || g || t || b || c) {
             hooked = true;
+        }
+    }
+
+    /**
+     * 解析六个目标的真实类名/方法名。
+     *
+     * ── 为什么整块包在 try 里 ──
+     *   定位是「尽力而为」：libdexkit.so 加载失败、宿主 APK 读不到、
+     *   DexKit native 崩溃，这些都可能导致整块抛异常。
+     *   但定位失败不等于不能工作——硬编码兜底还在（在 resolve 内部处理）。
+     *   只有连解析器都造不出来的时候，才退化成「全部用硬编码」。
+     */
+    private ResolvedTargets resolveTargets(ClassLoader cl,
+                                           XposedModuleInterface.PackageReadyParam param) {
+        ResolvedTargets rt = new ResolvedTargets();
+        try {
+            // 先确保 native 库可用。失败不致命：解析器会自动跳过 DexKit 层，
+            // 直接走硬编码兜底，功能仍然可用，只是失去跨版本适应能力。
+            ApplicationInfo moduleInfo = null;
+            try {
+                moduleInfo = getModuleApplicationInfo();
+            } catch (Throwable e) {
+                log(Log.WARN, TAG, "拿不到模块 ApplicationInfo: " + e);
+            }
+            boolean dexkitReady = DexKitLoader.ensureLoaded(moduleInfo);
+
+            // 宿主 APK 路径：DexKit 需要从磁盘读 dex。
+            String apkPath = null;
+            try {
+                ApplicationInfo hostInfo = param.getApplicationInfo();
+                apkPath = hostInfo == null ? null : hostInfo.sourceDir;
+            } catch (Throwable e) {
+                log(Log.WARN, TAG, "拿不到宿主 APK 路径: " + e);
+            }
+
+            // appTag = 包名 + versionCode。
+            // 带版本号是刻意的：升级/降级都会自动切换到独立命名空间，
+            // 不会把旧版本的混淆名拿到新版本上用（那种错误比"找不到"更难查）。
+            String appTag = Const.PKG_OUC + ":" + hostVersionCode(param);
+
+            TargetCache cache = null;
+            try {
+                cache = new TargetCache(new java.io.File(Const.DST_DIR, "targets.conf"));
+            } catch (Throwable e) {
+                log(Log.WARN, TAG, "定位缓存不可用（不影响功能，只是每次都要重查）: " + e);
+            }
+
+            TargetResolver resolver = new TargetResolver(dexkitReady ? cache : null);
+            rt.resolver = resolver;
+            rt.all = resolver.resolveAll(HookTarget.ALL, cl, apkPath, appTag);
+
+            // 汇总一行日志，方便一眼看出本机到底适配到什么程度。
+            StringBuilder sb = new StringBuilder("定位结果: ");
+            for (HookTarget t : HookTarget.ALL) {
+                TargetResolver.Resolved r = rt.all.get(t.id);
+                sb.append('[').append(t.id).append('=')
+                        .append(r == null || r.className == null
+                                ? "失败" : r.source)
+                        .append("] ");
+            }
+            log(Log.INFO, TAG, sb.toString());
+
+        } catch (Throwable e) {
+            // 连解析器都造不出来。这时 all 为空，各 hook 会各自回落到硬编码。
+            log(Log.ERROR, TAG, "目标解析整体失败，全部回落到硬编码: " + e);
+        }
+        return rt;
+    }
+
+    /**
+     * 宿主 versionCode。只用来给定位缓存分命名空间，取不到就是 0，不影响功能。
+     *
+     * ── 为什么不用 PackageManager ──
+     *   PackageReady 阶段 ActivityThread.currentApplication() 有可能还是 null，
+     *   走 PM 要多一层判空、还多一次 Binder 调用。
+     *   ApplicationInfo 是随参数直接带过来的，够用且零成本。
+     *
+     * ── 为什么先试 longVersionCode ──
+     *   ApplicationInfo.versionCode（int）从 API 28 起被标记废弃，
+     *   官方建议改用 longVersionCode（long，同为字段）。
+     *   本模块 minSdk = 26，26/27 上只有 int 字段，
+     *   直接读 long 字段会抛 NoSuchFieldError，所以按版本分支。
+     *   两条路读的是同一个值，只是宽度不同。
+     */
+    private long hostVersionCode(XposedModuleInterface.PackageReadyParam param) {
+        try {
+            ApplicationInfo ai = param.getApplicationInfo();
+            if (ai == null) {
+                return 0L;
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                return ai.longVersionCode;
+            }
+            @SuppressWarnings("deprecation")
+            int v = ai.versionCode;
+            return v;
+        } catch (Throwable ignored) {
+            // 拿不到就是 0，退化成「所有版本共用一个缓存命名空间」，
+            // 每次启动会重查一遍，只是慢一点，不会挂错方法。
+            return 0L;
+        }
+    }
+
+    /**
+     * 六个目标的解析结果集合。
+     *
+     * 为什么单独包一层：hook 方法需要「拿到某个目标，拿不到就用硬编码」，
+     * 这个动作在六处都要重复。封装成 get(id, fallbackClass, fallbackMethod) 之后，
+     * 每个 hook 方法里只剩一行，不会出现六种不一致的降级写法。
+     */
+    static final class ResolvedTargets {
+        TargetResolver resolver;
+        java.util.Map<String, TargetResolver.Resolved> all =
+                java.util.Collections.emptyMap();
+
+        /** 取一个目标的类名。没有则返回兜底值。 */
+        String cls(String id, String fallback) {
+            TargetResolver.Resolved r = all.get(id);
+            return r == null || r.className == null ? fallback : r.className;
+        }
+
+        /** 取一个目标的方法名。没有则返回兜底值。 */
+        String mth(String id, String fallback) {
+            TargetResolver.Resolved r = all.get(id);
+            return r == null || r.methodName == null ? fallback : r.methodName;
+        }
+
+        /** 这个目标是否真的定位到了（不管来源）。 */
+        boolean ok(String id) {
+            TargetResolver.Resolved r = all.get(id);
+            return r != null && r.className != null;
         }
     }
 
@@ -147,10 +295,15 @@ public class OtaHook extends XposedModule {
      *
      * K 是 public，用 getDeclaredMethod 取即可。
      */
-    private boolean hookK(ClassLoader cl) {
+    private boolean hookK(ClassLoader cl, ResolvedTargets rt) {
+        // 类名/方法名可能来自四条不同来源（缓存/DexKit/硬编码），
+        // 先取出来存局部变量，后面日志、Class.forName、报错都用同一份，
+        // 避免出错时日志显示的与实际尝试的不是同一个名字。
+        String cn = rt.cls(HookTarget.LOCAL_ENTRY.id, CLS_KHL);
+        String mn = rt.mth(HookTarget.LOCAL_ENTRY.id, "K");
         try {
-            Class<?> kl = Class.forName(CLS_KHL, false, cl);
-            Method k = kl.getDeclaredMethod("K", Context.class);
+            Class<?> kl = Class.forName(cn, false, cl);
+            Method k = kl.getDeclaredMethod(mn, Context.class);
 
             hook(k).intercept(chain -> {
                 Object ctxArg = chain.getArg(0);
@@ -173,10 +326,10 @@ public class OtaHook extends XposedModule {
                 return null;
             });
 
-            log(Log.INFO, TAG, "已挂 kh.l.K(Context)");
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn + "(Context)");
             return true;
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "挂 K() 失败: " + t);
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + "(Context) 失败: " + t);
             return false;
         }
     }
@@ -201,7 +354,7 @@ public class OtaHook extends XposedModule {
                 Object self = chain.getThisObject();
                 if (p != null && self == p.hostActivity()) {
                     try {
-                        if (p.onActivityResult(
+                        if (p.dispatchPanelActivityResult(
                                 (Integer) chain.getArg(0),
                                 (Integer) chain.getArg(1),
                                 (Intent) chain.getArg(2))) {
@@ -258,10 +411,12 @@ public class OtaHook extends XposedModule {
      * 默认开启（Const.DEFAULT_BLOCK_UPDATE = true），所以装完就生效，
      * 用户不用先去开一次。关掉后原样放行，OUC 恢复真实的更新提示。
      */
-    private boolean hookCheckSum(ClassLoader cl) {
+    private boolean hookCheckSum(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.CHECK_SUM.id, CLS_CHECK_BASE);
+        String mn = rt.mth(HookTarget.CHECK_SUM.id, MTH_CHECK_SUM);
         try {
-            Class<?> base = Class.forName(CLS_CHECK_BASE, false, cl);
-            Method sum = base.getDeclaredMethod(MTH_CHECK_SUM);
+            Class<?> base = Class.forName(cn, false, cl);
+            Method sum = base.getDeclaredMethod(mn);
 
             // 先解析全部字段。任何一个取不到就整体放弃：
             // 字段名对不上说明 OUC 换了版本，这时挂上去只会空转，不如明确报错。
@@ -296,12 +451,12 @@ public class OtaHook extends XposedModule {
                 return r;
             });
 
-            log(Log.INFO, TAG, "已挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn
                     + "()，检查更新将恒为无新版本");
             return true;
         } catch (Throwable t) {
             // 挂不上不影响本地更新功能，只是关不掉检查更新。
-            log(Log.ERROR, TAG, "挂 " + CLS_CHECK_BASE + "." + MTH_CHECK_SUM + " 失败: " + t);
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
             return false;
         }
     }
@@ -335,10 +490,12 @@ public class OtaHook extends XposedModule {
      *   降级仍会被 update_engine 对 oeminfo 的校验拦下，那条路要动分区，
      *   本模块不碰。
      */
-    private boolean hookPackageType(ClassLoader cl) {
+    private boolean hookPackageType(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.PKG_TYPE.id, Const.CLS_PKG_TYPE);
+        String mn = rt.mth(HookTarget.PKG_TYPE.id, Const.MTH_PKG_TYPE);
         try {
-            Class<?> w1 = Class.forName(Const.CLS_PKG_TYPE, false, cl);
-            Method m = w1.getDeclaredMethod(Const.MTH_PKG_TYPE);
+            Class<?> w1 = Class.forName(cn, false, cl);
+            Method m = w1.getDeclaredMethod(mn);
             // private static：必须开放访问，否则 hook 时取不到方法体
             m.setAccessible(true);
 
@@ -355,11 +512,11 @@ public class OtaHook extends XposedModule {
                 return Const.PKG_TYPE_RECOVERY;
             });
 
-            log(Log.INFO, TAG, "已挂 " + Const.CLS_PKG_TYPE + "." + Const.MTH_PKG_TYPE + "()");
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn + "()");
             return true;
         } catch (Throwable t) {
             // 挂不上只是没有全量包功能，不影响已经工作的屏蔽与本地更新。
-            log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + "." + Const.MTH_PKG_TYPE + " 失败: " + t);
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
             return false;
         }
     }
@@ -419,11 +576,13 @@ public class OtaHook extends XposedModule {
      *   受「强制全量包」开关控制。用户开这个开关的目的就是「要全量包」，
      *   版本组和包类型必须一起改，只改 x2() 不改版本组等于问错了地方。
      */
-    private boolean hookCheckGroup(ClassLoader cl) {
+    private boolean hookCheckGroup(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.CHECK_GROUP.id, CLS_CHECK_BASE);
+        String mn = rt.mth(HookTarget.CHECK_GROUP.id, Const.MTH_CHECK_GROUP);
         try {
-            Class<?> base = Class.forName(CLS_CHECK_BASE, false, cl);
+            Class<?> base = Class.forName(cn, false, cl);
             Class<?> info = Class.forName(Const.CLS_DEPEND_CHECK_INFO, false, cl);
-            Method r = base.getDeclaredMethod(Const.MTH_CHECK_GROUP, info);
+            Method r = base.getDeclaredMethod(mn, info);
 
             // 两个 setter 是 public 的普通 POJO 方法，直接取来用，
             // 避免每次调用都做反射查找。
@@ -449,11 +608,11 @@ public class OtaHook extends XposedModule {
                 return ret;
             });
 
-            log(Log.INFO, TAG, "已挂 " + CLS_CHECK_BASE + "." + Const.MTH_CHECK_GROUP
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn
                     + "()，全量包模式将请求正式版本组");
             return true;
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "挂 " + CLS_CHECK_BASE + "." + Const.MTH_CHECK_GROUP + " 失败: " + t);
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
             return false;
         }
     }
@@ -496,10 +655,12 @@ public class OtaHook extends XposedModule {
      *   与 p()/V6() 共用 isBlockEffective()：屏蔽关掉或强制全量包开着时
      *   原样放行，尝鲜页恢复真实内容。
      */
-    private boolean hookTrialVersion(ClassLoader cl) {
+    private boolean hookTrialVersion(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.TRIAL_RENDER.id, Const.CLS_TRIAL_VIEW);
+        String mn = rt.mth(HookTarget.TRIAL_RENDER.id, Const.MTH_TRIAL_RENDER);
         try {
-            Class<?> view = Class.forName(Const.CLS_TRIAL_VIEW, false, cl);
-            Method l0 = view.getDeclaredMethod(Const.MTH_TRIAL_RENDER,
+            Class<?> view = Class.forName(cn, false, cl);
+            Method l0 = view.getDeclaredMethod(mn,
                     int.class, int.class, String.class, String.class);
             l0.setAccessible(true);
 
@@ -521,11 +682,11 @@ public class OtaHook extends XposedModule {
                 return chain.proceed(a);
             });
 
-            log(Log.INFO, TAG, "已挂 " + Const.CLS_TRIAL_VIEW + "." + Const.MTH_TRIAL_RENDER
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn
                     + "()，屏蔽生效时尝鲜将显示无活动");
             return true;
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "挂 " + Const.CLS_TRIAL_VIEW + "." + Const.MTH_TRIAL_RENDER + " 失败: " + t);
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
             return false;
         }
     }
@@ -646,10 +807,12 @@ public class OtaHook extends XposedModule {
      *   与其它 hook 共用 isBlockEffective()：屏蔽关掉、或强制全量包
      *   开着时原样放行，保留真实红点。
      */
-    private boolean hookBadgeCount(ClassLoader cl) {
+    private boolean hookBadgeCount(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.BADGE_COUNT.id, Const.CLS_PKG_TYPE);
+        String mn = rt.mth(HookTarget.BADGE_COUNT.id, "V6");
         try {
-            Class<?> w1 = Class.forName(Const.CLS_PKG_TYPE, false, cl);
-            Method v6 = w1.getDeclaredMethod("V6", Context.class, int.class);
+            Class<?> w1 = Class.forName(cn, false, cl);
+            Method v6 = w1.getDeclaredMethod(mn, Context.class, int.class);
             v6.setAccessible(true);
             hook(v6).intercept(chain -> {
                 if (!SwitchStore.isBlockEffective()) {
@@ -676,11 +839,11 @@ public class OtaHook extends XposedModule {
                 }
                 return ret;
             });
-            log(Log.INFO, TAG, "已挂 " + Const.CLS_PKG_TYPE + ".V6(Context,int)，"
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn + "(Context,int)，"
                     + Const.KEY_HN_NEW_SYSTEM_UPDATE + " 与桌面角标将恒为 0");
             return true;
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "挂 " + Const.CLS_PKG_TYPE + ".V6 失败: " + t);
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
             return false;
         }
     }

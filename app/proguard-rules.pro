@@ -21,3 +21,25 @@
 
 # Theme / SwitchButton / SwitchStore 是纯内部实现，由上面的类直接 new 出来，
 # 不按名字反射，因此不 keep。
+
+# ══════════════════════════════════════════════════════════════
+# DexKit 保留规则
+# ══════════════════════════════════════════════════════════════
+# DexKit 的 Kotlin 层会按名字反射到自己的 native 桥接类
+# （DexKitBridge 及其 Companion），这些名字一旦被混淆，
+# native 侧按 JNI 注册的方法名就对不上，表现为
+# findClass 返回空表或直接 JNI abort。
+# 这里整体 keep 整个包，代价是几百个类不进混淆，
+# 但不影响宿主 dex 的定位结果（那是运行时扫宿主 APK 得到的）。
+-keep class org.luckypray.dexkit.** { *; }
+-dontwarn org.luckypray.dexkit.**
+
+# DexKit 依赖 Kotlin 标准库；本项目是纯 Java 没有 Kotlin 插件，
+# 因此这些类不会被 R8 的 Kotlin 元数据规则处理，
+# 需要显式忽略缺失的注解与协程类，否则 release 构建会因
+# 「R8 找不到 kotlin.Metadata」报错。
+-dontwarn kotlin.**
+-dontwarn kotlinx.**
+-dontwarn com.google.flatbuffers.**
+-keep class com.google.flatbuffers.** { *; }
+-dontwarn dev.rikka.ndk.**

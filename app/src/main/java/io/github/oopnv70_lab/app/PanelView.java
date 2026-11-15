@@ -154,8 +154,19 @@ final class PanelView extends FrameLayout {
         }
     }
 
-    /** 由 OtaHook 里挂的 onActivityResult 转进来。 */
-    boolean onActivityResult(int requestCode, int resultCode, Intent data) {
+    /**
+     * 由 OtaHook 里挂的 onActivityResult 转进来。
+     *
+     * ── 为什么不叫 onActivityResult ──
+     *   android.view.View 里存在一个同签名的 @hide 方法
+     *   public boolean onActivityResult(int,int,Intent)，
+     *   它不在公开 SDK 的 android.jar 里，但在带隐藏 API 的
+     *   framework jar（如 robolectric android-all）里可见。
+     *   同名就会构成「用包级可见性覆盖 public 方法」，一旦构建
+     *   环境换成带隐藏 API 的 jar 就直接编译失败。
+     *   改个名字两边都安全，语义也更清楚：这是面板自己的分发入口。
+     */
+    boolean dispatchPanelActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode != REQ_PICK) {
             return false;
         }

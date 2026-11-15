@@ -26,8 +26,8 @@ android {
         applicationId = "io.github.oopnv70_lab.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 11
-        versionName = "2.9"
+        versionCode = 12
+        versionName = "2.10"
     }
 
     signingConfigs {
@@ -72,6 +72,18 @@ android {
             )
             excludes += "**"
         }
+        jniLibs {
+            // ── 这一行是 DexKit 能不能用起来的关键 ──
+            // DexKit 的 findClass/findMethod 都是 native 实现，靠 libdexkit.so。
+            // AGP 9 默认 useLegacyPackaging = false，会把 .so 以「不压缩、直接
+            // 对齐存放」的方式打进 APK，运行时由 linker 直接从 APK 内映射，
+            // 官方文档明确写了：这种模式下 System.loadLibrary 找不到它。
+            // 而本模块的思路是「用 System.load(模块 APK 里的 so 绝对路径)」，
+            // 需要 so 是磁盘上的真实文件，所以必须打开 legacy packaging，
+            // 让 AGP 把 so 解压到 nativeLibraryDir。
+            // 依据：https://luckypray.org/DexKit/zh-cn/guide/quick-start.html
+            useLegacyPackaging = true
+        }
     }
 
     lint {
@@ -82,4 +94,17 @@ android {
 
 dependencies {
     compileOnly(libs.libxposed.api)
+
+    // ── DexKit：动态定位 target 的引擎 ──
+    // 为什么不是 compileOnly：它自带 native 库 libdexkit.so，
+    // 必须在运行时存在于模块 APK 里，hook 时再按绝对路径 System.load。
+    // 为什么不是 implementation 的替代方案（自己解析 dex）：
+    // 纯 Java 解析 dex 要处理 multidex、紧凑常量池、隐藏 API，
+    // 在宿主进程里做还会踩内存和类加载时序，成本远高于引一个库。
+    //
+    // 许可：DexKit 是 LGPL-3.0 + Apache-2.0 双许可，本项目 AGPL-3.0。
+    // LGPL 允许在 AGPL 项目中链接使用（AGPL 与 LGPL-3.0 兼容），
+    // 但要求保留其许可声明——META-INF 的 LICENSE/NOTICE 已在上面
+    // packaging.resources.merges 里强制保留。
+    implementation(libs.dexkit)
 }
