@@ -239,7 +239,6 @@ final class TargetResolver {
         if (target.mustUseStrings != null && target.mustUseStrings.length > 0) {
             mm.usingStrings(target.mustUseStrings);
         }
-
         // 顺带把签名约束加上，减少候选。
         // 注意：这里只加返回类型，不加参数类型——
         // 参数类型在混淆后仍然稳定（是类型不是名字），但
@@ -247,7 +246,15 @@ final class TargetResolver {
         if (target.returnType != null) {
             mm.returnType(target.returnType);
         }
-
+        // 限定在 abstract 类里。
+        // 实测动机：PHASE03 在 l5.b（基类，abstract）和 l5.i（HiCareMode，
+        // 具体子类）里各出现一次，两个方法签名完全一样，
+        // 光靠参数类型筛不掉；这里要的是基类那份通用实现。
+        if (target.shape != null && target.shape.requireAbstract) {
+            mm.declaredClass(ClassMatcher.create()
+                    .modifiers(java.lang.reflect.Modifier.ABSTRACT,
+                            org.luckypray.dexkit.query.enums.MatchType.Contains));
+        }
         MethodDataList list = b.findMethod(FindMethod.create().matcher(mm));
         if (list == null || list.isEmpty()) {
             return null;
@@ -275,7 +282,8 @@ final class TargetResolver {
         if (target.shape != null
                 && (target.shape.hasFieldOfType != null
                 || target.shape.minBooleanFields > 0
-                || target.shape.superClassNotObject != null)) {
+                || target.shape.superClassNotObject != null
+                || target.shape.requireAbstract)) {
 
             ClassMatcher cm = new ClassMatcher();
 
@@ -286,6 +294,16 @@ final class TargetResolver {
                 // 这个类型必须被用到（matchType Contains 表示「包含」这个字段即可）
                 fm.matchType(org.luckypray.dexkit.query.enums.MatchType.Contains);
                 cm.fields(fm);
+            }
+
+            // 「必须是 abstract」直接在查询层做掉，不让子类进候选。
+            // 实测动机：CHECK_SUM 只写「≥8 boolean」时，基类 l5.b 和
+            // 它的子类 l5.d0 都会命中（子类继承走了基类的全部 boolean），
+            // 候选变 2 个，后面只能判「不唯一」放弃。
+            // 基类是 abstract、具体模式不是，这一条正好把它们分开。
+            if (target.shape.requireAbstract) {
+                cm.modifiers(java.lang.reflect.Modifier.ABSTRACT,
+                        org.luckypray.dexkit.query.enums.MatchType.Contains);
             }
 
             // 方法签名约束挂在类上，避免拿到结构相似但方法不存在的类
@@ -363,12 +381,72 @@ final class TargetResolver {
             mm.paramCount(0);
         }
         MethodDataList list = b.findMethod(FindMethod.create().matcher(mm));
-        if (list == null || list.size() != 1) {
-            Log.w(TAG, target.label + " 类 " + cd.getName() + " 内方法数 "
-                    + (list == null ? 0 : list.size()) + "，不唯一");
+        if (list == null || list.isEmpty()) {
+            Log.w(TAG, target.label + " 类 " + cd.getName() + " 内没有符合签名的方法");
             return null;
         }
-        return toResolved(list.get(0), "dexkit");
+        if (list.size() == 1) {
+            return toResolved(list.get(0), "dexkit");
+        }
+
+        // ── 类内仍有多个候选：用「方法体里用到了哪个字段」再收一次 ──
+        // 实测动机：CHECK_SUM 定位到 l5.b 之后，光按「void + 0 参」
+        // 在这个类里会命中 8 个方法（q/D/E/J/K/m/n/p），只能靠语义再筛。
+        // target.shape 里带的自有字段名就是这一步的判据（见 HookTarget）。
+        List<MethodData> afterField = narrowByDeclaredClassField(b, cd, target, list);
+        if (afterField.size() == 1) {
+            return toResolved(afterField.get(0), "dexkit");
+        }
+        Log.w(TAG, target.label + " 类 " + cd.getName() + " 内方法 " + list.size()
+                + " 个，按字段收窄后 " + afterField.size() + " 个，不唯一");
+        return null;
+    }
+
+    /**
+     * 在给定类内，把候选方法再按「是否读写某个自有字段」筛一遍。
+     *
+     * 判据来自 HookTarget.shape.uniqueField，那个字段是实测枚举出来的：
+     * 同一个类里 8 个 void 无参方法，只有一个会碰它。
+     *
+     * 实现上直接问 DexKit「哪些方法用了这个字段」，再做交集合，
+     * 而不是自己解析指令流——后者要处理 invoke 的寄存器，
+     * 容易在 smali 细节上出错，而这些事 DexKit 已经在 native 层做完了。
+     */
+    private List<MethodData> narrowByDeclaredClassField(DexKitBridge b, ClassData cd,
+                                                        HookTarget target,
+                                                        MethodDataList candidates) {
+        List<MethodData> out = new ArrayList<>(candidates);
+        String field = target.shape == null ? null : target.shape.uniqueField;
+        if (field == null || field.isEmpty()) {
+            return out;
+        }
+        try {
+            MethodMatcher fm = MethodMatcher.create();
+            fm.declaredClass(cd.getName());
+            fm.addUsingField(field);
+            MethodDataList users = b.findMethod(FindMethod.create().matcher(fm));
+            if (users == null || users.isEmpty()) {
+                Log.w(TAG, target.label + " 没有任何方法用到字段 " + field);
+                return new ArrayList<>();
+            }
+            java.util.Set<String> keep = new java.util.HashSet<>();
+            for (MethodData md : users) {
+                keep.add(md.getName() + "(" + md.getParamTypeNames() + ")"
+                        + md.getReturnTypeName());
+            }
+            List<MethodData> filtered = new ArrayList<>();
+            for (MethodData md : out) {
+                String key = md.getName() + "(" + md.getParamTypeNames() + ")"
+                        + md.getReturnTypeName();
+                if (keep.contains(key)) {
+                    filtered.add(md);
+                }
+            }
+            return filtered;
+        } catch (Throwable t) {
+            Log.w(TAG, target.label + " 按字段收窄出错，保留原候选: " + t);
+            return out;
+        }
     }
 
     /**
@@ -403,6 +481,10 @@ final class TargetResolver {
         try {
             Class<?> c = Class.forName(cd.getName(), false, cl);
             if (c == null) {
+                return false;
+            }
+            if (shape.requireAbstract
+                    && !java.lang.reflect.Modifier.isAbstract(c.getModifiers())) {
                 return false;
             }
             if (shape.superClassNotObject != null) {
@@ -451,6 +533,10 @@ final class TargetResolver {
      */
     private boolean shapeMatchesByDex(ClassData cd, HookTarget.StructShape shape) {
         try {
+            if (shape.requireAbstract
+                    && !java.lang.reflect.Modifier.isAbstract(cd.getModifiers())) {
+                return false;
+            }
             if (shape.superClassNotObject != null) {
                 ClassData sup = cd.getSuperClass();
                 if (sup == null || "java.lang.Object".equals(sup.getName())) {

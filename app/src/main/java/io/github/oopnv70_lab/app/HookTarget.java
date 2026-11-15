@@ -79,30 +79,66 @@ final class HookTarget {
      * 存在的意义：像 l5.b.p() 这种「无参 void」的方法，
      * 全包有上万个候选，单靠签名根本筛不出来；
      * 而它的方法体里一个字符串都没有，字符串特征也失效。
-     * 这时候只能描述「这个类长什么样」：
-     *   持有 DependCheckInfo 类型的字段 + 至少 8 个 boolean 字段。
-     * 这种结构是「检查结果汇总类」的语义指纹，
-     * 混淆改不了它——改了字段类型，业务逻辑就崩了。
+     * 这时候只能描述「这个类长什么样」。
+     *
+     * ── 为什么光靠「boolean 字段够多」不够（实测踩过） ──
+     *   第一版只写了「持有 DependCheckInfo 字段 + ≥8 个 boolean」，
+     *   结果 l5.b（19 个 boolean）和 l5.d0（12 个 boolean）**都**满足：
+     *   d0 是 b 的子类，继承走了 b 的全部 boolean，自己又加了几个。
+     *   于是 findClass 返回 2 个类，过滤后仍是 2 个，判定「不唯一」直接放弃，
+     *   最终回落到硬编码 l5.b#p —— 界面上就显示成「写死的名字」。
+     *
+     *   修法是描述得再具体一点，而具体的那一面恰恰是混淆不掉的：
+     *     requireAbstract   基类 CheckMode 是 abstract，d0 是具体模式不是；
+     *     minDeclaredFields 只看类**自己**声明的字段，不含继承，
+     *                       b 自己写 16 个（9 个 boolean），d0 只写 4 个。
+     *   两条一起用，就把「基类」和「某个具体模式」分开了。
      */
     static final class StructShape {
         /** 必须持有这个类型的字段（简单类名或全名，包含匹配）。null 表示不要求。 */
         final String hasFieldOfType;
 
-        /** 必须至少有这么多 boolean 字段。0 表示不要求。 */
+        /** 必须至少有这么多 boolean 字段（只数自己声明的）。0 表示不要求。 */
         final int minBooleanFields;
 
-        /** 必须至少有这么多字段总数。0 表示不要求。 */
+        /** 必须至少有这么多字段总数（只数自己声明的）。0 表示不要求。 */
         final int minFields;
 
         /** 父类必须是这个（包含匹配）。null 表示不要求。 */
         final String superClassNotObject;
 
+        /** 类必须是 abstract。用于「基类」与「某个具体子类」的区分。 */
+        final boolean requireAbstract;
+
+        /**
+         * 类内仍需进一步筛选时用的字段名。null 表示不用这一步。
+         *
+         * 用途：定位到类之后，光靠方法签名可能还剩好几个候选
+         * （例如 l5.b 里有 8 个 void 无参方法），这时要求
+         * 「方法体里必须读或写这个字段」把它们分开。
+         * 选字段的标准是实测出来的唯一性——同一个类里只有一个方法碰它。
+         */
+        final String uniqueField;
+
         StructShape(String hasFieldOfType, int minBooleanFields, int minFields,
                     String superClassNotObject) {
+            this(hasFieldOfType, minBooleanFields, minFields, superClassNotObject, false, null);
+        }
+
+        StructShape(String hasFieldOfType, int minBooleanFields, int minFields,
+                    String superClassNotObject, boolean requireAbstract) {
+            this(hasFieldOfType, minBooleanFields, minFields, superClassNotObject,
+                    requireAbstract, null);
+        }
+
+        StructShape(String hasFieldOfType, int minBooleanFields, int minFields,
+                    String superClassNotObject, boolean requireAbstract, String uniqueField) {
             this.hasFieldOfType = hasFieldOfType;
             this.minBooleanFields = minBooleanFields;
             this.minFields = minFields;
             this.superClassNotObject = superClassNotObject;
+            this.requireAbstract = requireAbstract;
+            this.uniqueField = uniqueField;
         }
 
         static StructShape none() {
@@ -116,8 +152,22 @@ final class HookTarget {
     /**
      * 一、检查更新汇总：l5.b.p()V → 压掉「有新版本」标志位
      *
-     * 字符串特征完全失效（方法体无 const-string），
-     * 所以靠结构：持有 DependCheckInfo 字段 + 9 个 boolean 字段。
+     * ── 字符串特征完全失效 ──
+     *   p() 的方法体里一个 const-string 都没有（全是 boolean 赋值和字段搬运），
+     *   所以只能描述「这个类长什么样」。
+     *
+     * ── 特征怎么定的（都是实测值，不是估的） ──
+     *   l5.b 自称 16 个字段、9 个 boolean；是 abstract（CheckMode 基类）。
+     *   l5.d0 是它的子类，自称只有 4 个字段，且不是 abstract。
+     *   只写「≥8 boolean」时两者都过，所以必须加上 abstract 这一条。
+     *
+     * ── p() 在类内怎么唯一确定 ──
+     *   l5.b 里有 8 个 void 无参方法（q/D/E/J/K/m/n/p），
+     *   光按「void + 0 参」在这个类里找会命中 8 个。
+     *   所以额外要求：方法必须碰 this.o 字段。
+     *   实测 this.o 只在一处被赋值，就在 p() 里
+     *   （this.o = this.a.getHasSelfNewVersion()），
+     *   所以「用到了 o 字段的 void 无参方法」在这个类里唯一。
      */
     static final HookTarget CHECK_SUM = new HookTarget(
             "check_sum",
@@ -125,7 +175,7 @@ final class HookTarget {
             "void",
             new String[]{},   // 无参 void，太宽，全靠结构层
             new String[]{},
-            new StructShape("DependCheckInfo", 8, 9, null),
+            new StructShape("DependCheckInfo", 9, 16, null, true, "o"),
             "l5.b#p");
 
     /**
@@ -145,15 +195,29 @@ final class HookTarget {
     /**
      * 三、版本组写入：l5.b.R(DependCheckInfo)V
      *
-     * 方法体含 PHASE03 / SERVICE，是正式版本组的名字。
+     * ── 方法体含 PHASE03 / SERVICE，是正式版本组的名字 ──
+     *   这两个值是和服务器通信的协议取值，改了就对接不上服务器，
+     *   所以 ROM 改混淆时也留着了，实测仍能命中。
+     *
+     * ── 为什么参数写成全名 ──
+     *   PHASE03 在 l5.b 和 l5.i（HiCareMode）里都出现，两个方法签名完全相同，
+     *   必须靠参数类型把候选收窄。而 DexKit 的 paramTypes 是拿字符串
+     *   去比对 dex 里的**完整类型描述符**，写简写 "DependCheckInfo" 比不过
+     *   "com.hihonor.android.hnouc.check.model.checkinfo.DependCheckInfo"。
+     *   第一版就是简写，导致 2 个候选一个都筛不掉，判「不唯一」后回落硬编码。
+     *
+     * ── 唯一性还要靠 abstract ──
+     *   即便参数筛成 l5.b.R 和 l5.i.R 两个，仍然不唯一。
+     *   l5.i 是具体模式（HiCareMode），l5.b 是 abstract 基类；
+     *   这里要的是基类里那份「通用写法」，所以再加 requireAbstract。
      */
     static final HookTarget CHECK_GROUP = new HookTarget(
             "check_group",
             "请求版本组写入",
             "void",
-            new String[]{"DependCheckInfo"},
+            new String[]{"com.hihonor.android.hnouc.check.model.checkinfo.DependCheckInfo"},
             new String[]{"PHASE03"},
-            StructShape.none(),
+            new StructShape(null, 0, 0, null, true),
             "l5.b#R");
 
     /**

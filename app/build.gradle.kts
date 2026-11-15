@@ -26,8 +26,8 @@ android {
         applicationId = "io.github.oopnv70_lab.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 15
-        versionName = "2.13"
+        versionCode = 16
+        versionName = "2.14"
     }
 
     signingConfigs {
