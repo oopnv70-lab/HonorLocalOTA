@@ -14,6 +14,7 @@ import org.luckypray.dexkit.query.matchers.MethodsMatcher;
 import org.luckypray.dexkit.result.ClassData;
 import org.luckypray.dexkit.result.ClassDataList;
 import org.luckypray.dexkit.result.FieldData;
+import org.luckypray.dexkit.result.FieldDataList;
 import org.luckypray.dexkit.result.MethodData;
 import org.luckypray.dexkit.result.MethodDataList;
 
@@ -86,6 +87,21 @@ final class TargetResolver {
 
     TargetResolver(TargetCache cache) {
         this.cache = cache;
+    }
+
+    /**
+     * 直接塞一个已经建好的 bridge。
+     *
+     * 给「模块自己进程里的解析」用：那边由 TargetProbe 负责创建 bridge
+     * （因为它要同时统计 dex 数量、捕获创建失败的具体异常），
+     * 再交给引擎复用，避免同一个 APK 被解析两遍。
+     *
+     * 传进来的必须是能用的 bridge；传 null 等价于没调过。
+     */
+    void attachBridge(DexKitBridge b) {
+        if (b != null) {
+            this.bridge = b;
+        }
     }
 
     /**
@@ -356,24 +372,39 @@ final class TargetResolver {
     }
 
     /**
-     * 用真实的 Class 反射复核结构特征。
+     * 用类结构复核特征。
      *
-     * 为什么不直接用 DexKit 的 FieldsMatcher.count 做条件：
-     * DexKit 的 count 是「匹配到的字段个数」，而我们要的是
-     * 「boolean 字段至少 8 个」，语义上需要按类型统计，
-     * 用 java 反射复核更直白、也更容易调试。
-     * 此时类已经能被 ClassLoader 加载，反射代价很小。
+     * ── 两种运行环境，判定方式不同 ──
+     *   · cl != null：宿主进程，反射拿到真实 Class，字段类型最准。
+     *   · cl == null：模块自己的进程，只能看 DexKit 给的 ClassData。
+     *     ClassData 里有 getFields()、getSuperClass()，足够判断
+     *     「boolean 字段至少 N 个」「有某类型的字段」「父类不是 Object」，
+     *     结论与反射一致。区别只是拿不到运行时的合成字段，但 dex 里
+     *     写的字段就是编译产物本身，反而更贴近平铺特征的本意。
      */
     private boolean shapeMatches(ClassData cd, HookTarget.StructShape shape, ClassLoader cl) {
         if (shape == null) {
             return true;
         }
+        if (cd == null) {
+            return false;
+        }
+        if (cl != null) {
+            return shapeMatchesByReflect(cd, shape, cl);
+        }
+        return shapeMatchesByDex(cd, shape);
+    }
+
+    /**
+     * 反射版结构校验（宿主进程用）。
+     */
+    private boolean shapeMatchesByReflect(ClassData cd, HookTarget.StructShape shape,
+                                          ClassLoader cl) {
         try {
             Class<?> c = Class.forName(cd.getName(), false, cl);
             if (c == null) {
                 return false;
             }
-
             if (shape.superClassNotObject != null) {
                 Class<?> sup = c.getSuperclass();
                 if (sup == null || sup == Object.class) {
@@ -413,6 +444,50 @@ final class TargetResolver {
         }
     }
 
+    /**
+     * DexKit 版结构校验（模块自己进程用）。
+     *
+     * 全部数据来自 ClassData，不碰 ClassLoader。
+     */
+    private boolean shapeMatchesByDex(ClassData cd, HookTarget.StructShape shape) {
+        try {
+            if (shape.superClassNotObject != null) {
+                ClassData sup = cd.getSuperClass();
+                if (sup == null || "java.lang.Object".equals(sup.getName())) {
+                    return false;
+                }
+            }
+            if (shape.minFields <= 0 && shape.minBooleanFields <= 0
+                    && shape.hasFieldOfType == null) {
+                return true;
+            }
+            FieldDataList fs = cd.getFields();
+            int total = fs == null ? 0 : fs.size();
+            if (total < shape.minFields) {
+                return false;
+            }
+            int bools = 0;
+            boolean hasType = shape.hasFieldOfType == null;
+            if (fs != null) {
+                for (FieldData f : fs) {
+                    String tn = f.getTypeName();
+                    if ("boolean".equals(tn)) {
+                        bools++;
+                    }
+                    if (!hasType && tn != null && tn.contains(shape.hasFieldOfType)) {
+                        hasType = true;
+                    }
+                }
+            }
+            if (bools < shape.minBooleanFields) {
+                return false;
+            }
+            return hasType;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════
     // 硬编码兜底
     // ══════════════════════════════════════════════════════════════
@@ -420,8 +495,13 @@ final class TargetResolver {
     /**
      * 用写死的名字去碰。这是最后一道保险，不是主力。
      *
-     * 必须是「能真的加载到」才算成功——只判断字符串非空没有意义，
+     * 必须是「类和方法都真的存在」才算成功——只判断字符串非空没有意义，
      * 类不存在的话挂上去照样失败，还掩盖了真正的问题。
+     *
+     * ── 两种运行环境 ──
+     *   · cl != null：宿主进程，反射问一句就够了。
+     *   · cl == null：模块自己的进程，用 DexKit 查 dex，
+     *     确认这个类里有这个名的方法。语义与反射相同。
      */
     private Resolved resolveHardcoded(HookTarget target, ClassLoader cl) {
         String fb = target.hardcodedFallback;
@@ -431,30 +511,63 @@ final class TargetResolver {
         int i = fb.indexOf('#');
         String cn = fb.substring(0, i);
         String mn = fb.substring(i + 1);
-
         if (!classExists(cn, cl)) {
             Log.w(TAG, "硬编码兜底 " + cn + " 在宿主里不存在");
             return null;
         }
         // 方法存在性也验一下，避免类对了方法改名了还当成成功
-        try {
-            Class<?> c = Class.forName(cn, false, cl);
-            boolean found = false;
-            for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
-                if (m.getName().equals(mn)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                Log.w(TAG, "硬编码兜底 " + cn + "#" + mn + " 方法不存在");
-                return null;
-            }
-        } catch (Throwable e) {
+        if (!methodExists(cn, mn, cl)) {
+            Log.w(TAG, "硬编码兜底 " + cn + "#" + mn + " 方法不存在");
             return null;
         }
         return new Resolved(cn, mn, target.paramTypes == null ? new String[0] : target.paramTypes,
                 "hardcoded");
+    }
+
+    /**
+     * 判断类里有没有这个名的方法。
+     *
+     * cl == null 时走 DexKit：getClassData 拿到 ClassData，
+     * 再遍历它自己的 getMethods()。注意不能用 bridge.getMethodData(
+     * "类名#方法名") —— 那个字符串格式要带签名，名字对不上会直接返回
+     * null，反而不如自己遍历稳。
+     */
+    private boolean methodExists(String cn, String mn, ClassLoader cl) {
+        if (cl != null) {
+            try {
+                Class<?> c = Class.forName(cn, false, cl);
+                for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                    if (m.getName().equals(mn)) {
+                        return true;
+                    }
+                }
+            } catch (Throwable e) {
+                return false;
+            }
+            return false;
+        }
+        DexKitBridge b = bridge;
+        if (b == null) {
+            return false;
+        }
+        try {
+            ClassData cd = b.getClassData(cn);
+            if (cd == null) {
+                return false;
+            }
+            MethodDataList ms = cd.getMethods();
+            if (ms == null) {
+                return false;
+            }
+            for (MethodData md : ms) {
+                if (mn.equals(md.getName())) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Throwable e) {
+            return false;
+        }
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -516,13 +629,38 @@ final class TargetResolver {
         return new Resolved(md.getDeclaredClassName(), md.getName(), pt, source);
     }
 
+    /**
+     * 判断一个类是否真的存在。
+     *
+     * ── 两种运行环境，判定方式不同 ──
+     *   · cl != null：跑在宿主进程里，让宿主的 ClassLoader 真加载一次。
+     *     这是最强证据，加载得到才敢往上挂。
+     *   · cl == null：跑在模块自己的进程里。那里根本加载不到
+     *     com.hihonor.ouc 的类——不同 APK、不同 ClassLoader 链，也没
+     *     那套依赖。但解析本身并不需要加载类，只需要确认它在 dex 里
+     *     存在。这时改用 DexKit 直接查 dex，结论同样可靠。
+     *
+     * 这个分支是「解析引擎脱离宿主进程独立运行」的关键：少了它，
+     * 设置页的解析按钮就只能靠一个假的成功来自我安慰。
+     */
     private boolean classExists(String name, ClassLoader cl) {
-        if (name == null || cl == null) {
+        if (name == null) {
+            return false;
+        }
+        if (cl != null) {
+            try {
+                Class.forName(name, false, cl);
+                return true;
+            } catch (Throwable e) {
+                return false;
+            }
+        }
+        DexKitBridge b = bridge;
+        if (b == null) {
             return false;
         }
         try {
-            Class.forName(name, false, cl);
-            return true;
+            return b.getClassData(name) != null;
         } catch (Throwable e) {
             return false;
         }

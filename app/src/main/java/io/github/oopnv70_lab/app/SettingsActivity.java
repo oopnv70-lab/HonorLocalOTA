@@ -66,6 +66,13 @@ public class SettingsActivity extends Activity {
     private TextView restartHint;
     private TextView restartBtn;
 
+    /** 「目标定位」按钮与结果区。 */
+    private TextView probeBtn;
+    private TextView probeSummary;
+    private TextView probeResult;
+    /** 解析进行中，防止连点。与 busy 分开：它不碰开关文件，互不干扰。 */
+    private volatile boolean probing;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -91,10 +98,13 @@ public class SettingsActivity extends Activity {
         // ── 卡片二：强制全量包 ──
         page.addView(buildFullCard(), theme.gaps(this, 14, 0));
 
-        // ── 卡片三：重启「软件更新」 ──
+        // ── 卡片三：目标定位 ──
+        page.addView(buildProbeCard(), theme.gaps(this, 14, 0));
+
+        // ── 卡片四：重启「软件更新」 ──
         page.addView(buildRestartCard(), theme.gaps(this, 14, 0));
 
-        // ── 卡片四：状态 ──
+        // ── 卡片五：状态 ──
         page.addView(buildStatusCard(), theme.gaps(this, 14, 0));
 
         ScrollView sv = new ScrollView(this);
@@ -229,6 +239,153 @@ public class SettingsActivity extends Activity {
         row.addView(sw, swLp);
 
         return row;
+    }
+
+    // ─────────────── 卡片：目标定位 ───────────────
+    /**
+     * 动态定位 OUC 的混淆类名/方法名，并把结果直接显示出来。
+     *
+     * ── 为什么用户需要看见这个 ──
+     *   模块能不能用，取决于「目标定没定到」。以前这件事只在
+     *   logcat 里，用户装完模块、点不动、看不出任何原因，只能来问。
+     *   现在点一下就把六个目标的定位结论摆在眼前：
+     *     · 定到了 → 显示 类名#方法名 [来源]
+     *     · 没定到 → 显示「未定位」，并且能看出是哪一类目标失败
+     *
+     * ── 为什么这个按钮不依赖 root、不依赖 hook ──
+     *   解析是对 APK 的静态分析，只读 dex。跑在本 App 自己的进程里，
+     *   和 OUC 有没有被 hook 完全无关。所以「换版本、换设备是否还能
+     *   定位到」这件事，本来就可以在这里独立验证，不必拿实机试错。
+     */
+    private LinearLayout buildProbeCard() {
+        LinearLayout card = theme.card(this);
+
+        card.addView(theme.sectionTitle(this, "目标定位"), theme.matchWrap());
+
+        TextView desc = theme.text(this,
+                "读取「软件更新」的安装包，按语义特征动态找出需要修改的类和方法。",
+                13, theme.onSurfaceVariant);
+        desc.setLineSpacing(Theme.dp(this, 3), 1f);
+        card.addView(desc, theme.gaps(this, 12, 0));
+
+        TextView why = theme.text(this,
+                "这是整个模块兼容性的基础：荣耀改版会重新混淆类名，"
+                        + "写死的名字立刻失效，而按语义特征查依然能找到。"
+                        + "换版本或换设备后点一次，就知道还能不能用。",
+                12, theme.onSurfaceVariant);
+        why.setLineSpacing(Theme.dp(this, 3), 1f);
+        card.addView(why, theme.gaps(this, 8, 0));
+
+        probeBtn = theme.text(this, "解析目标", 16, theme.onPrimary);
+        probeBtn.setGravity(Gravity.CENTER);
+        probeBtn.setTypeface(android.graphics.Typeface.create(
+                "sans-serif-medium", android.graphics.Typeface.NORMAL));
+        probeBtn.setPadding(0, Theme.dp(this, 12), 0, Theme.dp(this, 12));
+        probeBtn.setBackground(theme.rounded(this, theme.primary, 999));
+        probeBtn.setClickable(true);
+        card.addView(probeBtn, theme.gaps(this, 16, 0));
+
+        probeSummary = theme.text(this, "尚未解析", 12, theme.onSurfaceVariant);
+        probeSummary.setPadding(0, Theme.dp(this, 10), 0, 0);
+        card.addView(probeSummary, theme.matchWrap());
+
+        probeResult = theme.text(this, "", 12, theme.onSurface);
+        probeResult.setTypeface(android.graphics.Typeface.MONOSPACE);
+        probeResult.setLineSpacing(Theme.dp(this, 5), 1f);
+        probeResult.setTextIsSelectable(true);
+        probeResult.setPadding(0, Theme.dp(this, 12), 0, 0);
+        card.addView(probeResult, theme.matchWrap());
+
+        probeBtn.setOnClickListener(v -> doProbe());
+        return card;
+    }
+
+    /**
+     * 执行一次解析。
+     *
+     * 放后台线程：DexKit 首次解析一个 29MB 的 APK 要数秒，主线程必 ANR。
+     * 期间按钮置灰改文案，避免用户以为没反应而连点。
+     */
+    private void doProbe() {
+        if (probing) {
+            toast("正在解析，请稍候");
+            return;
+        }
+        probing = true;
+        probeBtn.setEnabled(false);
+        probeBtn.setText("正在解析…");
+        probeBtn.setBackground(theme.rounded(this, theme.surfaceVariant, 999));
+        probeBtn.setTextColor(theme.onSurfaceVariant);
+        probeSummary.setText("正在读取安装包并解析 dex…");
+        probeSummary.setTextColor(theme.onSurfaceVariant);
+        probeResult.setText("");
+
+        new Thread(() -> {
+            final TargetProbe.Report rep = TargetProbe.probe(this);
+            ui.post(() -> {
+                probing = false;
+                probeBtn.setEnabled(true);
+                probeBtn.setText("解析目标");
+                probeBtn.setBackground(theme.rounded(this, theme.primary, 999));
+                probeBtn.setTextColor(theme.onPrimary);
+                renderReport(rep);
+            });
+        }, "target-probe").start();
+    }
+
+    /**
+     * 把解析结果铺到界面上。
+     *
+     * 顺序按 HookTarget.ALL 走；每行三段：中文名 → 混淆名 → 来源。
+     * 「来源」是关键信息：
+     *   dexkit    = 语义定位成功，跨版本能力正常
+     *   cache     = 上次查过，直接复用
+     *   hardcoded = 语义定位失败，退回写死的名字，换版本就会失效
+     *   none      = 完全没定到，这个功能在本机不可用
+     */
+    private void renderReport(TargetProbe.Report rep) {
+        boolean hasError = !rep.errors.isEmpty();
+        probeSummary.setText(rep.summary());
+        probeSummary.setTextColor(hasError ? theme.onSurfaceVariant : theme.primary);
+
+        StringBuilder sb = new StringBuilder();
+        for (HookTarget t : HookTarget.ALL) {
+            TargetResolver.Resolved r = rep.get(t.id);
+            sb.append(t.label).append('\n');
+            if (r == null || r.className == null) {
+                sb.append("  ✗ 未定位 —— 该功能在本机不可用\n\n");
+                continue;
+            }
+            sb.append("  ").append(r.className).append('#').append(r.methodName).append('\n');
+            sb.append("  来源 ").append(describeSource(r.source)).append('\n');
+            sb.append('\n');
+        }
+        if (!rep.errors.isEmpty()) {
+            sb.append("── 错误 ──\n");
+            for (String e : rep.errors) {
+                sb.append("· ").append(e).append('\n');
+            }
+        }
+        probeResult.setText(sb.toString().trim());
+    }
+
+    /** 把来源标识翻成一句人话。 */
+    private String describeSource(String source) {
+        if (source == null) {
+            return "未知";
+        }
+        switch (source) {
+            case "dexkit":
+                return "语义定位（跨版本可用）";
+            case "cache":
+                return "上次解析结果（已复核存在）";
+            case "hardcoded":
+                return "写死的名字（换版本会失效）";
+            case "none":
+                return "无";
+            default:
+                return source;
+        }
     }
 
     // ─────────────── 卡片：重启「软件更新」 ───────────────
