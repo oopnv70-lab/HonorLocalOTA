@@ -78,16 +78,6 @@ public class OtaHook extends XposedModule {
     private static final String TAG = "HonorLocalOTA";
 
     /**
-     * 本地更新面板入口的兜底类名。
-     *
-     * ── 这个常量已经降级为「兜底值」──
-     *   实际类名由 TargetResolver 动态定位（见 HookTarget.LOCAL_ENTRY），
-     *   只有动态定位全部失败时才会用到这里。
-     *   当前值在 OUC 18.0.4.120 上仍然存在，所以兜底是可靠的。
-     */
-    private static final String CLS_KHL = "kh.l";
-
-    /**
      * 检查更新的汇总基类，source: CheckMode.java。
      *
      * 手动检查走的 l5.d0（NormalMode.java）等 10 个模式类全部继承它，
@@ -112,28 +102,14 @@ public class OtaHook extends XposedModule {
             "h", "i", "l", "j", "k", "m", "n", "o"
     };
 
-    /** 当前正在显示的面板，同一时刻最多一个。 */
-    private static volatile PanelView sPanel;
-
     /**
-     * 本次进程的定位结果，供面板展示。
+     * 本次进程的定位结果。
      *
-     * 为什么放 static：面板由悬浮按钮按需创建，创建时机晚于 hook 安装，
-     * 需要把「已解析出什么」带给面板。它只写一次（onPackageReady 里），
-     * 之后只读，因此不需要同步。
+     * 只写一次（onPackageReady 里），之后只读，因此不需要同步。
+     * 保留它是为了让「定位结果」这条证据链在宿主进程里也能查（日志 + 缓存文件），
+     * 界面显示那份在模块 App 自己的进程里独立算，见 TargetProbe。
      */
     private static volatile ResolvedTargets sTargets;
-
-    /**
-     * 悬浮入口。挂在 OUC 的 Activity 上。
-     *
-     * ── 为什么必须有它 ──
-     *   原版「本地更新」菜单项在运行时被 OUC 自己隐藏了，所以
-     *   kh.l.K() 永远不会被调用，只靠 hook K() 的话面板永远出不来。
-     *   用户点不到的东西等于不存在——这是本模块之前最根本的缺口。
-     *   这里改成自己往 OUC 界面挂一个常驻按钮，用户点它打开面板。
-     */
-    private static volatile TextView sEntry;
 
     private volatile boolean hooked;
 
@@ -162,25 +138,13 @@ public class OtaHook extends XposedModule {
 ResolvedTargets rt = resolveTargets(cl, param);
         sTargets = rt;
 
-        // 悬浮入口：OUC 的 Activity 每次走到前台都挂一次。
-        // 放在最前面做，因为它不依赖任何定位结果——即使六个目标全失败，
-        // 用户也应该能点开面板看到"哪个目标没定位到"，而不是什么都点不到。
-        installEntryHook();
-
         // 六件事互相独立，不能因为一件挂不上就放弃其余：
-        //   hookK/hookActivityResult → 本地更新入口（面板投放）
         //   hookCheckSum             → 关掉「检查更新」的新版本提示
         //   hookPackageType          → 强制向服务器要全量包
         //   hookCheckGroup           → 把请求发到正式版本组（全量包收不到更新的根治点）
         //   hookTrialVersion         → 屏蔽生效时尝鲜页不显示新版本
         //   hookBadge                → OUC 自己界面内的角标
         //   hookBadgeCount           → 设置页那个红点（写 Secure 表时压成 0）
-        boolean k = hookK(cl, rt);
-        if (k) {
-            hookActivityResult();
-        } else {
-            log(Log.WARN, TAG, "本地更新入口未挂上，但继续尝试关闭检查更新");
-        }
         boolean s = hookCheckSum(cl, rt);
         boolean f = hookPackageType(cl, rt);
         boolean g = hookCheckGroup(cl, rt);
@@ -188,7 +152,7 @@ ResolvedTargets rt = resolveTargets(cl, param);
         boolean b = hookBadge(cl);
         boolean c = hookBadgeCount(cl, rt);
 
-        if (k || s || f || g || t || b || c) {
+        if (s || f || g || t || b || c) {
             hooked = true;
         }
     }
@@ -251,83 +215,11 @@ ResolvedTargets rt = resolveTargets(cl, param);
                         .append("] ");
             }
             log(Log.INFO, TAG, sb.toString());
-
-            // 把这一轮的定位结果写成报告，供模块 App 读取显示。
-            //
-            // 为什么必须在这里写：定位只能在本进程做（宿主 APK 路径和 ClassLoader 在这里是白送的），
-            // 而用户要看结果的界面在模块 App 里。两个进程之间只能靠文件，见 TargetReport 的注释。
-            //
-            // 写败不影响功能：这一步只是把已经算出来的东西留个副本，不参与 hook 决策。
-            writeProbeReport(rt, appTag);
         } catch (Throwable e) {
             // 连解析器都造不出来。这时 all 为空，各 hook 会各自回落到硬编码。
             log(Log.ERROR, TAG, "目标解析整体失败，全部回落到硬编码: " + e);
         }
         return rt;
-    }
-
-    /**
-     * 把本轮定位结果写成报告文件，供模块 App 读取显示。
-     *
-     * ── 为什么写在这里而不是模块 App 里 ──
-     *   定位要用的两样东西——宿主 APK 路径、宿主 ClassLoader——
-     *   只在被注入的宿主进程里才是白送的。模块 App 那边要自己拿，
-     *   既会被 Android 11+ 的包可见性过滤挡住，也拿不到宿主 ClassLoader
-     *   来复核类名。所以定位在这里做完，结果留一份给 App 读。
-     *
-     * ── 为什么用 TargetCache 的同目录 ──
-     *   /data/local_ota 的标签是 local_ota_file，本进程（platform_app_all）
-     *   可写、模块 App 走 root 可读。这是本模块唯一不需要额外授权的通道。
-     *
-     * ── 失败绝不影响功能 ──
-     *   报告只是「给人看的证据」，不参与任何 hook 决策。
-     *   写不进去最多是界面少一份报告，所有 hook 照旧，所以整块吞异常。
-     */
-    private void writeProbeReport(ResolvedTargets rt, String appTag) {
-        try {
-            if (rt == null) {
-                return;
-            }
-            File dst = new File(TargetReport.PATH);
-            File dir = dst.getParentFile();
-            if (dir != null && !dir.exists()) {
-                // 正常情况由 init 建好；这里兜底，失败也不报错。
-                //noinspection ResultOfMethodCallIgnored
-                dir.mkdirs();
-            }
-            String body = TargetReport.encode(appTag, rt.all);
-            // 先写临时文件再改名：模块 App 那边是按「# at= 变新了」来判断
-            // 这份报告是不是本轮写的，读到半截文件会判成没写。
-            File tmp = new File(TargetReport.PATH + ".tmp");
-            FileOutputStream out = new FileOutputStream(tmp);
-            try {
-                out.write(body.getBytes("UTF-8"));
-                out.flush();
-            } finally {
-                try {
-                    out.close();
-                } catch (Throwable ignored) {
-                }
-            }
-            if (!tmp.renameTo(dst)) {
-                // 某些实现下 rename 覆盖已存在文件会失败，退化为直接写。
-                FileOutputStream direct = new FileOutputStream(dst);
-                try {
-                    direct.write(body.getBytes("UTF-8"));
-                    direct.flush();
-                } finally {
-                    try {
-                        direct.close();
-                    } catch (Throwable ignored) {
-                    }
-                }
-                //noinspection ResultOfMethodCallIgnored
-                tmp.delete();
-            }
-            log(Log.INFO, TAG, "定位报告已写入 " + TargetReport.PATH);
-        } catch (Throwable e) {
-            log(Log.WARN, TAG, "写定位报告失败（不影响功能）: " + e);
-        }
     }
 
     /**
@@ -407,205 +299,6 @@ ResolvedTargets rt = resolveTargets(cl, param);
         /** 取原始结果，供面板展示。 */
         TargetResolver.Resolved get(String id) {
             return all.get(id);
-        }
-    }
-
-    /**
-     * 拦住 kh.l.K(Context)。
-     *
-     * K 是 public，用 getDeclaredMethod 取即可。
-     */
-    private boolean hookK(ClassLoader cl, ResolvedTargets rt) {
-        // 类名/方法名可能来自四条不同来源（缓存/DexKit/硬编码），
-        // 先取出来存局部变量，后面日志、Class.forName、报错都用同一份，
-        // 避免出错时日志显示的与实际尝试的不是同一个名字。
-        String cn = rt.cls(HookTarget.LOCAL_ENTRY.id, CLS_KHL);
-        String mn = rt.mth(HookTarget.LOCAL_ENTRY.id, "K");
-        try {
-            Class<?> kl = Class.forName(cn, false, cl);
-            Method k = kl.getDeclaredMethod(mn, Context.class);
-
-            hook(k).intercept(chain -> {
-                Object ctxArg = chain.getArg(0);
-
-                if (!(ctxArg instanceof Activity)) {
-                    // 不是 Activity 上下文就挂不了面板，交回原版（会弹窗，但不至于崩）。
-                    log(Log.WARN, TAG, "K() 的 Context 不是 Activity，放行原版流程");
-                    return chain.proceed();
-                }
-
-                Activity act = (Activity) ctxArg;
-                try {
-                    showPanel(act);
-                } catch (Throwable t) {
-                    log(Log.ERROR, TAG, "挂面板失败: " + t);
-                }
-
-                // 不 proceed：R() 就在 K() 里面，放行必然会弹免责声明。
-                log(Log.INFO, TAG, "已拦截 K()，改为显示投放面板");
-                return null;
-            });
-
-            log(Log.INFO, TAG, "已挂 " + cn + "." + mn + "(Context)");
-            return true;
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + "(Context) 失败: " + t);
-            return false;
-        }
-    }
-
-    /**
-     * 挂 OUC 界面生命周期，在界面上放一个常驻按钮。
-     *
-     * ── 为什么同时挂两个方法 ──
-     *   这两个都是「Activity 已经能显示」的信号，但都有被原版重写的可能：
-     *     · onResume 是 protected，OUC 的页面基本都会重写它
-     *       （要刷新数据、打点），重写后基类实现不再被调用，就挂不到；
-     *     · onWindowFocusChanged 是 public，重写它的 App 少得多，
-     *       但也不是零。
-     *   两个都挂，任意一个触发就补上，覆盖面最大。
-     *   attachEntry 自身是幂等的（用 view 的 parent 判重），
-     *   重复触发不会挂出两个按钮。
-     *
-     * ── 为什么不挂 onCreate ──
-     *   onCreate 之后原版常会再 setContentView，会把我们挂的 view 一起清掉。
-     *   而且 Activity 被系统回收后恢复不会重走 onCreate。
-     */
-    private void installEntryHook() {
-        hookEntryTrigger("onResume", false);
-        hookEntryTrigger("onWindowFocusChanged", true);
-    }
-
-    /**
-     * 挂一个生命周期方法作为「界面可显示」的触发点。
-     *
-     * @param name      方法名
-     * @param hasArg    是否需要带一个 boolean 参数（onWindowFocusChanged）
-     */
-    private void hookEntryTrigger(String name, boolean hasArg) {
-        try {
-            Method m = hasArg
-                    ? Activity.class.getDeclaredMethod(name, boolean.class)
-                    : Activity.class.getDeclaredMethod(name);
-
-            hook(m).intercept(chain -> {
-                // 先让原版跑完：它可能在这个方法里做 setContentView、
-                // 恢复状态等动作，我们要挂在它做完之后，否则会被清掉。
-                Object ret = chain.proceed();
-                Object self = chain.getThisObject();
-                if (self instanceof Activity) {
-                    try {
-                        attachEntry((Activity) self);
-                    } catch (Throwable t) {
-                        log(Log.WARN, TAG, "挂悬浮入口失败: " + t);
-                    }
-                }
-                return ret;
-            });
-            log(Log.INFO, TAG, "已挂 Activity." + name + "，悬浮入口触发点就绪");
-        } catch (Throwable t) {
-            // 一个触发点挂不上还有另一个，不算致命。
-            log(Log.WARN, TAG, "挂 Activity." + name + " 失败（另一个触发点仍可用）: " + t);
-        }
-    }
-
-    /**
-     * 把入口按钮加进 Activity 的 content 层。
-     *
-     * 不挂到某个具体布局里：OUC 的首页布局随版本变化，写死 id 会失效。
-     * 直接挂 android.R.id.content，位置用 layout_gravity 定，
-     * 这样不依赖任何原版布局结构。
-     */
-    private static void attachEntry(Activity act) {
-        String name = act.getClass().getName();
-        // 只挂在 OUC 自己的界面上，不污染它的系统弹窗/选择器等临时页面。
-        if (!name.startsWith(Const.PKG_OUC)) {
-            return;
-        }
-        ViewGroup content = act.findViewById(android.R.id.content);
-        if (content == null) {
-            return;
-        }
-        // 已经在树上就不再添加。用 parent 判断，见 installEntryHook 的注释。
-        TextView old = sEntry;
-        if (old != null && old.getParent() == content) {
-            return;
-        }
-
-        TextView btn = new TextView(act);
-        btn.setText("本地更新");
-        btn.setTextSize(13);
-        btn.setTextColor(0xFFFFFFFF);
-        btn.setGravity(Gravity.CENTER);
-        int padH = (int) (18 * act.getResources().getDisplayMetrics().density);
-        int padV = (int) (9 * act.getResources().getDisplayMetrics().density);
-        btn.setPadding(padH, padV, padH, padV);
-
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFF2A6DF4);
-        bg.setCornerRadius(999f);
-        btn.setBackground(bg);
-        btn.setElevation(8f);
-
-        btn.setOnClickListener(v -> {
-            try {
-                showPanel(act);
-            } catch (Throwable t) {
-                Log.e(TAG, "打开面板失败", t);
-            }
-        });
-
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.gravity = Gravity.BOTTOM | Gravity.END;
-        int margin = (int) (24 * act.getResources().getDisplayMetrics().density);
-        lp.setMargins(margin, margin, margin, margin + (int) (56 * act.getResources()
-                .getDisplayMetrics().density));
-        content.addView(btn, lp);
-
-        sEntry = btn;
-    }
-
-    /**
-     * 挂框架基类 android.app.Activity#onActivityResult(int,int,Intent)。
-     *
-     * 为什么不挂 MainEntranceActivity 或 BaseActivity 上的同名方法：
-     * 那两个类都没有重写它。目标 Activity 上最终执行的是
-     * android.app.Activity 的实现，所以只能挂基类。
-     *
-     * 挂基类唯一的副作用是：OUC 进程里所有 Activity 的回调都会经过这里，
-     * 因此只处理我们自己发起的 requestCode，其余一律原样 proceed。
-     */
-    private void hookActivityResult() {
-        try {
-            Method m = Activity.class.getDeclaredMethod(
-                    "onActivityResult", int.class, int.class, Intent.class);
-
-            hook(m).intercept(chain -> {
-                PanelView p = sPanel;
-                Object self = chain.getThisObject();
-                if (p != null && self == p.hostActivity()) {
-                    try {
-                        if (p.dispatchPanelActivityResult(
-                                (Integer) chain.getArg(0),
-                                (Integer) chain.getArg(1),
-                                (Intent) chain.getArg(2))) {
-                            // 面板认领了这次结果，不再往下传，
-                            // 避免原版拿一个它不认识的 requestCode 做事。
-                            return null;
-                        }
-                    } catch (Throwable t) {
-                        log(Log.ERROR, TAG, "转交 onActivityResult 失败: " + t);
-                    }
-                }
-                return chain.proceed();
-            });
-
-            log(Log.INFO, TAG, "已挂 Activity.onActivityResult");
-        } catch (Throwable t) {
-            // 挂不上不致命，只是选完文件后面板收不到结果。
-            log(Log.ERROR, TAG, "挂 Activity.onActivityResult 失败: " + t);
         }
     }
 
@@ -1167,22 +860,5 @@ ResolvedTargets rt = resolveTargets(cl, param);
             log(Log.ERROR, TAG, "挂 " + Const.CLS_BADGE + "." + Const.MTH_BADGE + " 失败: " + t);
             return false;
         }
-    }
-
-    /** 把面板挂到承载它的 Activity 上，同一时刻只保留一个。 */
-    private static void showPanel(Activity act) {
-        PanelView old = sPanel;
-        if (old != null) {
-            try {
-                old.dismiss();
-            } catch (Throwable ignored) {
-                // 旧面板所在 Activity 可能已销毁
-            }
-            sPanel = null;
-        }
-        PanelView p = new PanelView(act);
-        p.show();
-        sPanel = p;
-        Log.i(TAG, "面板已显示");
     }
 }

@@ -73,9 +73,6 @@ public class SettingsActivity extends Activity {
     /** 解析进行中，防止连点。与 busy 分开：它不碰开关文件，互不干扰。 */
     private volatile boolean probing;
 
-    /** 解析过程的系统浮窗。没授权时为 null。 */
-    private OverlayProgress overlay;
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -324,29 +321,13 @@ public class SettingsActivity extends Activity {
         probeBtn.setBackground(theme.rounded(this, theme.surfaceVariant, 999));
         probeBtn.setTextColor(theme.onSurfaceVariant);
         probeResult.setText("");
-
-        // 浮窗是可选的：下一步要把「软件更新」拉到最前面，
-        // 本 App 的进度条那时就被盖住了，只有系统浮窗能看得到。
-        // 没授权就不弹，不阻塞流程，结果照样回到本页。
-        overlay = new OverlayProgress();
-        boolean overlayShown = overlay.show(this);
-        if (overlayShown) {
-            probeSummary.setText("正在准备…（进度显示在屏幕上方浮窗）");
-        } else {
-            probeSummary.setText("正在准备…");
-        }
+        probeSummary.setText("正在准备…");
         probeSummary.setTextColor(theme.onSurfaceVariant);
 
         new Thread(() -> {
-            TargetProbe.Report rep = TargetProbe.probe(this, line -> {
-                // 进度回调在工作线程上来，两个面板都要切回主线程改。
-                ui.post(() -> {
-                    if (overlay != null) {
-                        overlay.step(line);
-                    }
-                    probeSummary.setText(line);
-                });
-            });
+            TargetProbe.Report rep = TargetProbe.probe(this, line ->
+                    // 进度回调在工作线程上来，改控件要切回主线程。
+                    ui.post(() -> probeSummary.setText(line)));
             ui.post(() -> finishProbe(rep));
         }, "target-probe").start();
     }
@@ -354,9 +335,8 @@ public class SettingsActivity extends Activity {
     /**
      * 一次解析结束后的收尾。
      *
-     * 浮窗不能立刻掩：用户这时正看着「软件更新」的界面，
-     * 结果在本 App 里是看不到的。先在浮窗上把结论显示几秒，
-     * 再收起来，然后把本 App 拉回前台，让用户看完整报告。
+     * 解析全程在本 App 内完成，界面一直可见，所以这里不需要浮窗、
+     * 也不需要把自己拉回前台——那是「借宿主进程解析」那条路留下的。
      */
     private void finishProbe(TargetProbe.Report rep) {
         probing = false;
@@ -365,36 +345,6 @@ public class SettingsActivity extends Activity {
         probeBtn.setBackground(theme.rounded(this, theme.primary, 999));
         probeBtn.setTextColor(theme.onPrimary);
         renderReport(rep);
-
-        if (overlay != null) {
-            overlay.finish(rep.summary());
-        }
-        ui.postDelayed(() -> {
-            if (overlay != null) {
-                overlay.dismiss();
-                overlay = null;
-            }
-            // 把本 App 拉回前台。不走 root：本 App 自己启动自己的
-            // Activity 不受后台启动限制（那限制只管开启别人的界面）。
-            bringSelfToFront();
-        }, 2200);
-    }
-
-    /**
-     * 把本 App 的界面拉回前台。
-     *
-     * 解析要先把「软件更新」拉起来，它会盖住本 App。
-     * 结果出来后不主动切回来，用户就只能自己切回去找本 App。
-     */
-    private void bringSelfToFront() {
-        try {
-            android.content.Intent i = new android.content.Intent(this, SettingsActivity.class);
-            i.addFlags(android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                    | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(i);
-        } catch (Throwable t) {
-            // 切不回来也不影响结果：报告已经写在界面上了。
-        }
     }
 
     /**

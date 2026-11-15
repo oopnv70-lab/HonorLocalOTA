@@ -16,24 +16,15 @@
            换设备后还能不能用」的证据。
 
       关于权限，这里必须说清楚，别再被旧注释误导：
-         · 开关文件在 /data/local_ota/，标签 local_ota_file，策略里
-           只有 adbd / platform_app_all / shell / update_engine 四个域被放行。
-         · OUC 进程是 platform_app_all，在放行名单里，直接读写即可。
-         · 本模块 App 跑在 untrusted_app，不在名单里，连 getattr 都没有。
-           所以设置页必须经 su 访问（见 RootShell.java），因此需要 root。
-         · 定位结果同样落在该目录（target_probe.conf），同样经 su 读。
+          · 开关文件在 /data/local_ota/，标签 local_ota_file，策略里
+            只有 adbd / platform_app_all / shell / update_engine 四个域被放行。
+          · OUC 进程是 platform_app_all，在放行名单里，直接读写即可。
+          · 本模块 App 跑在 untrusted_app，不在名单里，连 getattr 都没有。
+            所以设置页读写开关必须经 su（见 RootShell.java），因此需要 root。
+          · 目标定位不受这条限制：它只读 OUC 的 APK（system_file，对所有
+            appdomain 开放 read/open），解析全在本 App 进程里做，不需要 root，
+            也不需要把「软件更新」拉起来。
     -->
-
-    <!--
-      悬浮窗：解析要先经 root 把「软件更新」拉到最前面，本 App 的界面
-      那时被盖住了，只有系统浮窗能把进度显示给用户看。
-
-      · 这个权限不是硬前置：没有它解析照样跑，只是进度看不见，
-        结果仍然会回到本页（见 OverlayProgress 的注释）。
-      · 它是 API 23+ 的运行时授权，用户要在系统设置里
-        「显示在其他应用上层」打开，设置页会提示。
-    -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:label="@string/app_name"

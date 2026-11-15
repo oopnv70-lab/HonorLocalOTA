@@ -13,13 +13,10 @@ import android.widget.TextView;
  * 极简 Material You 风格主题。
  *
  * ── 为什么不用 Material Components 库 ──
- *   1. 那个库要给 APK 增加 1MB+ 体积，而本模块的功能只有两件，
+ *   1. 那个库要给 APK 增加 1MB+ 体积，而本模块的功能只有这几件，
  *      不值得为了几个控件引入整个设计系统。
- *   2. 更关键的是 PanelView 跑在 com.hihonor.ouc 进程里，
- *      它用的是 OUC 的 ClassLoader。如果 PanelView 依赖了
- *      Material 组件，那些类在 OUC 的 ClassLoader 里不存在，
- *      运行到 addView 时会 NoClassDefFoundError。
- *      保持两者都只用 framework 的 View，是最稳的做法。
+ *   2. 本模块会用到的控件全部跑在模块自己的 App 进程里，
+ *      但为了保持「只依赖 framework View」这条底线，也不引库。
  *
  * ── 视觉上怎么做到「现代」──
  *   跟 Material You 对齐的是这几个可量化的点，而不是某个具体库：

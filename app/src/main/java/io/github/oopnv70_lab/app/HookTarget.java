@@ -113,25 +113,6 @@ final class HookTarget {
     // ══════════════════════════════════════════════════════════════
     // 五个 OUC 侧目标
     // ══════════════════════════════════════════════════════════════
-
-    /**
-     * 〇、本地更新面板入口：kh.l.K(Context)V
-     *
-     * 这个最难描述，因为 K() 里面调的是 R()，而 R() 的日志字符串
-     * 是 showLocalUpdateWarrantDialog。字符串在**另一个方法**里，
-     * 所以这里用调用指纹：K() 必须调用一个含 showLocalUpdate 的方法。
-     *
-     * 兜底值 kh.l#K 保持不变。
-     */
-    static final HookTarget LOCAL_ENTRY = new HookTarget(
-            "local_entry",
-            "本地更新面板入口",
-            "void",
-            new String[]{"Context"},
-            new String[]{Const.NEEDLE},   // update_full_ 是本地更新语义
-            StructShape.none(),
-            "kh.l#K");
-
     /**
      * 一、检查更新汇总：l5.b.p()V → 压掉「有新版本」标志位
      *
@@ -206,6 +187,6 @@ final class HookTarget {
 
     /** 需要动态定位的全部 OUC 侧目标。 */
     static final HookTarget[] ALL = {
-            LOCAL_ENTRY, CHECK_SUM, PKG_TYPE, CHECK_GROUP, TRIAL_RENDER, BADGE_COUNT
+            CHECK_SUM, PKG_TYPE, CHECK_GROUP, TRIAL_RENDER, BADGE_COUNT
     };
 }

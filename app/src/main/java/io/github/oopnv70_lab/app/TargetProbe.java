@@ -1,57 +1,60 @@
 package io.github.oopnv70_lab.app;
 
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.util.Log;
 
+import org.luckypray.dexkit.DexKitBridge;
+
+import java.io.File;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * 触发一次「在软件更新进程内完成的目标定位」，并把结果取回来。
+ * 在本模块自己的进程里，对「软件更新」的 APK 做一次目标定位。
  *
  * ══════════════════════════════════════════════════════════════
- * 为什么必须在「软件更新」的进程里解析
+ * 为什么这件事在本进程就能做（实测结论，不是推断）
  * ══════════════════════════════════════════════════════════════
- * 定位要喂给 DexKit 的是**宿主 APK 的路径**，还要用宿主的 ClassLoader
- * 复核类名是否真的存在。这两样东西只有在被注入的宿主进程里才是白送的：
+ * 本机上「软件更新」是**系统应用**：
+ *     pm list packages -s        →  含 com.hihonor.ouc
+ *     pm path com.hihonor.ouc    →  /system/app/HnOUC/HnOUC.apk
+ *     ls -lZ                     →  -rw-r--r-- root root u:object_r:system_file:s0
+ *     /data/app 下没有它的更新版本
  *
- *   QQ 模块（QAuxiliary）的 DexKitDeobfs 就一行：
- *       DexKitBridge.create(hostInfo.application.applicationInfo.sourceDir)
- *   sourceDir 是 QQ 自己的包路径，因为那行代码跑在 QQ 进程里。
+ * system_file 这个标签本身就对 App 开放——每个 App 都必须能读
+ * /system/framework/framework-res.apk（同一个标签）才能起界面。
+ * 已用本 App 的身份实测：能打开 HnOUC.apk，能 ls /system/app。
  *
- * 模块自己的 App 跑在 untrusted_app 域，拿不到宿主的 ClassLoader；
- * 查 com.hihonor.ouc 的安装信息又会被 Android 11+ 的包可见性过滤挡住
- * （没声明 queries 就是 NameNotFoundException）。
- * 想在自己进程里解析，就得额外声明可见性、再造一份解析代码——那份代码
- * 还拿不到宿主 ClassLoader，复核能力天然后天不足。
+ * 所以定位需要的两样东西都到手了：
+ *   · APK 文件      → 直接读，不需要 root
+ *   · 解析引擎      → DexKit，so 就在本 APK 里（useLegacyPackaging true）
+ * 定位是纯静态分析 dex，不加载目标类、不调用目标方法，
+ * 和「跑在谁的进程里」无关。
  *
- * 所以走这条：**借住宿主进程解析，结果写文件，模块 App 读文件。**
- * 代价是必须先把「软件更新」启动一次，这个代价可以忽略。
+ * ── 这跟 QQ 模块（QAuxiliary）为什么不冲突 ──
+ *   QQ 是用户安装的 App，APK 在 /data/app/~~xxx/base.apk，
+ *   标签 apk_data_file 且带 MCS cat（u:...:s0:c512,c768），
+ *   别的 App 连 stat 都过不去。所以 QAuxiliary 只能把代码注入 QQ 进程，
+ *   在里面 applicationInfo.sourceDir 是白送的。
+ *   荣耀「软件更新」是 system app，没有这条隔离，不需要注入那一步。
  *
- * ── 为什么是「重启」而不是「启动」──
- *   hook 只在 OUC 进程启动时挂载；已经跑着的进程里 onPackageReady 早就
- *   跑完了，不会因为我们的请求再跑一遍。所以必须 force-stop 再 am start，
- *   让新进程重新走一遍 onPackageReady，解析才会真的发生。
- *
- * ── 进度怎么显示 ──
- *   am start 之后 OUC 会盖住本 App，界面上的进度条用户看不到，
- *   因此进度走系统浮窗（见 OverlayProgress）。
- *
- * ── 本类不碰 DexKit ──
- *   DexKit、libdexkit.so、TargetResolver 全都在 OUC 进程里跑
- *   （那边 OtaHook.resolveTargets 本来就有），这里只负责
- *   「踢一脚」+「等结果」+「把文件读成人能看的东西」。
+ * ── 之前为什么绕了远路 ──
+ *   我先假定「读不到别人的 APK」，于是做了一整套跨进程方案：
+ *   root 拉起 OUC → 宿主机进程写报告文件 → 模块 App root 读文件 →
+ *   再配一个系统浮窗显示进度。整套东西解决的是不存在的障碍。
+ *   实测一句 ls -lZ 就能否掉那个前提。
  */
 final class TargetProbe {
 
     private static final String TAG = "HonorLocalOTA";
 
-    /** 等报告的最长时间。首次解析一个 29MB 的 APK 要数秒，留足余量。 */
-    private static final long WAIT_MS = 120_000L;
+    /** 实测路径。系统应用的位置随 ROM 固定，不会因为版本升级而变。 */
+    private static final String OUC_APK = "/system/app/HnOUC/HnOUC.apk";
 
-    /** 进度回调。 */
+    /** 进度回调，用于界面显示当前做到哪一步。 */
     interface Progress {
         void onStep(String line);
     }
@@ -60,22 +63,20 @@ final class TargetProbe {
     static final class Report {
         /** 按 HookTarget.ALL 顺序的定位结果。 */
         final Map<String, TargetResolver.Resolved> results = new LinkedHashMap<>();
-        /** root 是否可用。 */
-        boolean rootOk;
-        /** 是否成功把「软件更新」重新拉起来。 */
-        boolean restartOk;
-        /** 拉起的结果描述（已重启 / 已启动 / 失败原因）。 */
-        String restartDetail = "";
-        /** 是否真的拿到了「软件更新」写出来的新报告。 */
-        boolean reportFound;
-        /** 报告里的宿主 APK 指纹。 */
+        /** 实际解析的 APK 路径。null 表示没找到。 */
+        String apkPath;
+        /** 这个 APK 是怎么找到的，写给人看。 */
+        String apkSource = "";
+        /** APK 的文件指纹（字节数_修改时间），换版本必变。 */
         String apkTag;
-        /** 报告写入时刻（毫秒）。0 表示没拿到。 */
-        long at;
-        /** 出过的错，非空时说明这一轮不完整。 */
+        /** APK 里的 dex 数量。 */
+        int dexCount;
+        /** libdexkit.so 是否加载成功。 */
+        boolean nativeReady;
+        /** 出过的错。 */
         final List<String> errors = new ArrayList<>();
 
-        /** 有几个目标是真正定位到的。 */
+        /** 有几个目标真正定位到了。 */
         int resolvedCount() {
             int n = 0;
             for (TargetResolver.Resolved r : results.values()) {
@@ -91,19 +92,16 @@ final class TargetProbe {
             return results.get(id);
         }
 
-        /** 一句话概括，给界面顶部的状态行用。 */
+        /** 一句话概括。 */
         String summary() {
-            if (!rootOk) {
-                return "没有 root 权限，无法启动「软件更新」的进程";
+            if (apkPath == null) {
+                return "没找到「软件更新」的安装包（本机可能不是荣耀系统）";
             }
-            if (!restartOk) {
-                return "启动「软件更新」失败：" + restartDetail;
-            }
-            if (!reportFound) {
-                return "「软件更新」没有写出解析结果";
+            if (!nativeReady) {
+                return "libdexkit.so 加载失败，无法解析";
             }
             return "已定位 " + resolvedCount() + " / " + results.size()
-                    + " 个目标" + (at > 0 ? "（" + ago(at) + "）" : "");
+                    + " 个目标（APK 内 dex " + dexCount + " 个）";
         }
     }
 
@@ -111,106 +109,208 @@ final class TargetProbe {
     }
 
     /**
-     * 完整流程：起进程 → 等报告 → 读回来。
+     * 执行一次定位。
      *
-     * 必须在后台线程调用：整个过程 10~60 秒，主线程必然 ANR。
-     * 任何一步失败都不抛异常，把原因写进 Report.errors，
-     * 让界面能一字一句告诉用户卡在哪。
+     * 必须在后台线程调用：首次解析一个 27MB 的 APK 要几秒，主线程必 ANR。
+     * 任何一步失败都不抛，原因写进 Report.errors，界面能逐条显示。
      */
     static Report probe(Context ctx, Progress p) {
         Report rep = new Report();
 
-        // ── 一、root ──
-        step(p, "检查 root 权限…");
-        rep.rootOk = RootShell.available();
-        if (!rep.rootOk) {
-            rep.errors.add("没有 root 权限。本模块要读 /data/local_ota/ 下的文件，"
-                    + "而该目录只对 adbd / platform_app_all / shell / update_engine 开放，"
-                    + "模块 App 是 untrusted_app，必须经 su 访问。");
+        // ── 一、找 APK ──
+        step(p, "查找「软件更新」的安装包…");
+        rep.apkPath = resolveApk(ctx, rep);
+        if (rep.apkPath == null) {
+            rep.errors.add("这些位置都没有可读的「软件更新」安装包："
+                    + OUC_APK + "、/system/app/*/*.apk");
+            return rep;
+        }
+        rep.apkTag = tag(rep.apkPath);
+        Log.i(TAG, "解析目标 APK: " + rep.apkPath + "（" + rep.apkSource + "）"
+                + " 指纹 " + rep.apkTag);
+
+        // ── 二、加载 libdexkit.so ──
+        step(p, "加载解析引擎…");
+        rep.nativeReady = loadNative(ctx);
+        if (!rep.nativeReady) {
+            rep.errors.add("libdexkit.so 加载失败。检查 packaging.jniLibs.useLegacyPackaging "
+                    + "是否为 true（AGP 9 默认 false 时 System.loadLibrary 找不到它）。");
             return rep;
         }
 
-        // ── 二、记下旧报告的写入时刻 ──
-        // 后面用它判断「这份报告是不是这次新写的」。只看文件存不存在不行：
-        // 上次解析留下的旧文件会让人以为这次成功了。
-        long beforeAt = 0;
+        // ── 三、解析 ──
+        step(p, "解析 dex，按语义特征查找类和方法（首次需要几秒）…");
+        TargetResolver resolver = new TargetResolver(null);
         try {
-            TargetReport.Parsed old = TargetReport.decode(RootShell.read(TargetReport.PATH));
-            beforeAt = old.at;
-            if (beforeAt > 0) {
-                Log.i(TAG, "已有旧报告，写入时刻 " + beforeAt + "，本次要求更新的报告");
+            DexKitBridge b = DexKitBridge.create(rep.apkPath);
+            if (b == null) {
+                rep.errors.add("DexKitBridge.create 返回 null");
+                return rep;
             }
+            rep.dexCount = b.getDexNum();
+            resolver.attachBridge(b);
         } catch (Throwable t) {
-            Log.w(TAG, "读旧报告失败（忽略，按无旧报告处理）: " + t);
-        }
-
-        // ── 三、重启「软件更新」，让 onPackageReady 重新跑一遍 ──
-        step(p, "启动「软件更新」…");
-        OucRestarter.Result rr = OucRestarter.restart();
-        rep.restartOk = rr.ok;
-        rep.restartDetail = rr.detail == null ? "" : rr.detail;
-        if (!rr.ok) {
-            rep.errors.add("启动「软件更新」失败：" + rep.restartDetail);
-            return rep;
-        }
-        step(p, rr.detail + "，等待进程内解析（首次要读 APK 里的 dex，请稍候）…");
-
-        // ── 四、等新报告 ──
-        // 等待放在 shell 里做，而不是在这边循环 fork su：
-        // 每轮 fork 一个 su 有几十上百毫秒开销，两分钟下来要 fork 上百次，
-        // 日志被刷满，还可能触发 su 管理器的高频调用提示。
-        // 一条 su 脚本内部按秒轮询，只 fork 一次。
-        String script = ""
-                + "P=" + TargetReport.PATH + "\n"
-                + "B=" + beforeAt + "\n"
-                + "i=0\n"
-                + "while [ $i -lt " + (WAIT_MS / 1000) + " ]; do\n"
-                + "  if [ -r \"$P\" ]; then\n"
-                + "    A=$(sed -n 's/^# at=//p' \"$P\" | head -n 1)\n"
-                + "    if [ -n \"$A\" ] && [ \"$A\" -gt \"$B\" ]; then\n"
-                + "      cat \"$P\"\n"
-                + "      echo PROBE_FILE_READY\n"
-                + "      exit 0\n"
-                + "    fi\n"
-                + "  fi\n"
-                + "  i=$((i+1))\n"
-                + "  sleep 1\n"
-                + "done\n"
-                + "echo PROBE_TIMEOUT\n"
-                + "exit 9\n";
-
-        long t0 = System.currentTimeMillis();
-        RootShell.Out o = RootShell.run(script, WAIT_MS + 10_000L);
-        String out = o.text == null ? "" : o.text;
-
-        if (!out.contains("PROBE_FILE_READY")) {
-            // 超时。给出可操作的排查方向，而不是笼统的「失败了」。
-            long sec = (System.currentTimeMillis() - t0) / 1000;
-            boolean alive = OucRestarter.isRunning();
-            rep.errors.add("等了 " + sec + " 秒，没有等到新报告"
-                    + "（「软件更新」进程" + (alive ? "在运行" : "没在运行") + "）。");
-            rep.errors.add("常见原因：LSPosed 里没有勾选 com.hihonor.ouc；"
-                    + "模块没启用；或本机不是荣耀系统（没有「软件更新」）。");
-            if (!out.contains("PROBE_TIMEOUT")) {
-                rep.errors.add("su 输出：" + out.trim());
-            }
+            Log.e(TAG, "创建 DexKitBridge 失败: " + t);
+            rep.errors.add("创建 DexKitBridge 失败: " + t);
             return rep;
         }
 
-        // ── 五、解析文件 ──
-        int cut = out.indexOf("PROBE_FILE_READY");
-        TargetReport.Parsed parsed = TargetReport.decode(out.substring(0, cut));
-        rep.reportFound = parsed.hasResults();
-        rep.apkTag = parsed.apkTag;
-        rep.at = parsed.at;
+        // ClassLoader 传 null：这里不是宿主进程，类存在性验证走 DexKit 查 dex。
+        // 注意这不是降级——传宿主的 ClassLoader 本来也拿不到，
+        // 而 DexKit 查类是否在 APK 里，对静态定位来说等价且更直接。
+        Map<String, TargetResolver.Resolved> out;
+        try {
+            out = resolver.resolveAll(HookTarget.ALL, null, rep.apkPath, rep.apkTag);
+        } catch (Throwable t) {
+            Log.e(TAG, "resolveAll 异常: " + t);
+            rep.errors.add("解析过程异常: " + t);
+            return rep;
+        }
         for (HookTarget t : HookTarget.ALL) {
-            TargetResolver.Resolved r = parsed.results.get(t.id);
+            TargetResolver.Resolved r = out.get(t.id);
             rep.results.put(t.id, r != null
                     ? r : new TargetResolver.Resolved(null, null, new String[0], "none"));
         }
         step(p, "解析完成：" + rep.resolvedCount() + " / " + rep.results.size());
-        Log.i(TAG, "探测完成，APK 指纹 " + rep.apkTag + "，结果 " + rep.summary());
+        Log.i(TAG, "定位完成: " + rep.summary());
         return rep;
+    }
+
+    /**
+     * 找「软件更新」的 APK。
+     *
+     * ── 顺序 ──
+     *   1. PackageManager：最权威，能拿到系统认定的 sourceDir。
+     *      system app 通常对 App 可见；若被包可见性挡住会抛异常，正常跳过。
+     *   2. 实测固定路径 /system/app/HnOUC/HnOUC.apk。
+     *   3. 扫 /system/app/ 下每个子目录里的 apk：荣耀改目录名时还能兜住。
+     *
+     * ── 为什么后两步不需要 PackageManager ──
+     *   /system 分区是全局可读的（system_file 标签），列目录、
+     *   读文件都对 App 开放，已实测。所以包可见性在这里根本不是障碍。
+     *
+     * 返回的路径必须真的能打开，否则会一路带出一个难懂的 DexKit 报错。
+     */
+    private static String resolveApk(Context ctx, Report rep) {
+        // 1. PackageManager
+        try {
+            ApplicationInfo ai = ctx.getPackageManager()
+                    .getApplicationInfo(Const.PKG_OUC, 0);
+            if (ai != null && ai.sourceDir != null && readable(ai.sourceDir)) {
+                rep.apkSource = "PackageManager 报告的安装位置";
+                return ai.sourceDir;
+            }
+        } catch (Throwable t) {
+            // 包可见性过滤（Android 11+ 未声明 queries 时）会走到这里，
+            // 不影响后面两步，因为 system_file 对 App 本来就可读。
+            Log.i(TAG, "getApplicationInfo(" + Const.PKG_OUC + ") 不可用，改走文件系统: " + t);
+        }
+
+        // 2. 实测固定路径
+        if (readable(OUC_APK)) {
+            rep.apkSource = "系统应用固定位置";
+            return OUC_APK;
+        }
+
+        // 3. 扫 /system/app/*
+        File dir = new File("/system/app");
+        File[] subs = dir.listFiles();
+        if (subs != null) {
+            // 目录名优先按 HnOUC 找，再退化为同名 apk
+            for (File sub : subs) {
+                if (!sub.isDirectory()) {
+                    continue;
+                }
+                String n = sub.getName().toLowerCase();
+                if (!n.contains("ouc") && !n.contains("honor") && !n.contains("hn")) {
+                    continue;
+                }
+                File[] fs = sub.listFiles();
+                if (fs == null) {
+                    continue;
+                }
+                for (File f : fs) {
+                    if (f.getName().endsWith(".apk") && readable(f.getAbsolutePath())) {
+                        rep.apkSource = "扫描 /system/app 找到（目录 " + sub.getName() + "）";
+                        return f.getAbsolutePath();
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean readable(String path) {
+        try {
+            File f = new File(path);
+            return f.isFile() && f.canRead() && f.length() > 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 加载 DexKit native 库。
+     *
+     * 这里是本 App 自己的进程，so 在自己的 nativeLibraryDir 里，
+     * System.loadLibrary 一步到位（前提 useLegacyPackaging = true）。
+     * 失败时按绝对路径再试一次，兜住 ROM 的非常规布局。
+     */
+    private static boolean loadNative(Context ctx) {
+        try {
+            System.loadLibrary("dexkit");
+            Log.i(TAG, "libdexkit.so 已通过 System.loadLibrary 加载");
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "System.loadLibrary(dexkit) 失败，改按绝对路径试: " + t);
+        }
+        try {
+            ApplicationInfo self = ctx.getApplicationInfo();
+            String abi = android.os.Build.SUPPORTED_ABIS.length > 0
+                    ? android.os.Build.SUPPORTED_ABIS[0] : "arm64-v8a";
+            String apkDir = self.sourceDir == null ? null : new File(self.sourceDir).getParent();
+            String[] cands = {
+                    self.nativeLibraryDir == null ? null : self.nativeLibraryDir + "/libdexkit.so",
+                    apkDir == null ? null : apkDir + "/lib/" + abi + "/libdexkit.so",
+            };
+            for (String p : cands) {
+                if (p == null) {
+                    continue;
+                }
+                File f = new File(p);
+                if (!f.isFile() || !f.canRead()) {
+                    continue;
+                }
+                try {
+                    System.load(p);
+                    Log.i(TAG, "libdexkit.so 已从 " + p + " 加载");
+                    return true;
+                } catch (Throwable t) {
+                    Log.w(TAG, "从 " + p + " 加载失败: " + t);
+                }
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "定位本 App 的 native 目录失败: " + t);
+        }
+        Log.e(TAG, "libdexkit.so 全部候选路径均失败");
+        return false;
+    }
+
+    /**
+     * 缓存命名空间 + 换版本检测用的指纹。
+     *
+     * 用「文件尺寸_修改时间」而不是 versionCode：compileSdk 37 的公开 SDK 里
+     * ApplicationInfo.versionCode / longVersionCode 对第三方不可见（这正是
+     * 构建 #44 失败的原因）。而且真正要防的是「APK 内容变了」，
+     * 文件指纹比版本号数字更贴近这件事。
+     */
+    private static String tag(String apkPath) {
+        try {
+            File f = new File(apkPath);
+            return Const.PKG_OUC + ":" + f.length() + "_" + f.lastModified();
+        } catch (Throwable t) {
+            return Const.PKG_OUC + ":0";
+        }
     }
 
     private static void step(Progress p, String line) {
@@ -218,25 +318,8 @@ final class TargetProbe {
             try {
                 p.onStep(line);
             } catch (Throwable ignored) {
-                // 进度显示出错绝不能影响解析本身。
+                // 进度显示出错不能影响解析。
             }
         }
-    }
-
-    /** 把毫秒时间戳说成「几秒前 / 几分钟前」。 */
-    private static String ago(long at) {
-        long d = System.currentTimeMillis() - at;
-        if (d < 0) {
-            return "刚刚";
-        }
-        long sec = d / 1000;
-        if (sec < 60) {
-            return sec + " 秒前写入";
-        }
-        long min = sec / 60;
-        if (min < 60) {
-            return min + " 分钟前写入";
-        }
-        return (min / 60) + " 小时前写入";
     }
 }
