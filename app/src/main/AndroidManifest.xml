@@ -3,11 +3,17 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-      模块本体是 LSPosed 插件，界面盖在 com.hihonor.ouc 的进程里：
-         · hook K / ActivityResult → 把「本地更新」入口投放到三点菜单
-         · hook l5.b.p() → 按开关决定是否把检查更新压成「无新版本」
-         · hook r9.w1.x2() → 按开关强制向服务器请求全量包
-      同时提供一个桌面入口 SettingsActivity，用来开关上面三项里的后两项。
+      模块本体是 LSPosed 插件，界面运行在 com.hihonor.ouc 的进程里：
+         · hook l5.b.p()              → 按开关决定是否把检查更新压成「无新版本」
+         · hook r9.w1.x2()            → 按开关强制向服务器请求全量包
+         · hook l5.b.R()              → 版本组写入（全量包能不能收到更新的关键）
+         · hook qg.g.l0()             → 屏蔽生效时尝鲜页不显示新版本
+         · hook r9.w1.V6()            → 设置页那个红点
+      另外提供一个桌面入口 SettingsActivity，用来：
+         · 开关上面四项里可配置的两项
+         · 触发一次「目标定位」，把当前系统版本里这些 hook 的真实
+           混淆类名/方法名解析出来显示给人看。这份结果就是「换版本、
+           换设备后还能不能用」的证据。
 
       关于权限，这里必须说清楚，别再被旧注释误导：
          · 开关文件在 /data/local_ota/，标签 local_ota_file，策略里
@@ -15,8 +21,19 @@
          · OUC 进程是 platform_app_all，在放行名单里，直接读写即可。
          · 本模块 App 跑在 untrusted_app，不在名单里，连 getattr 都没有。
            所以设置页必须经 su 访问（见 RootShell.java），因此需要 root。
-         · 面板选包走系统 SAF，不需要任何存储权限。
+         · 定位结果同样落在该目录（target_probe.conf），同样经 su 读。
     -->
+
+    <!--
+      悬浮窗：解析要先经 root 把「软件更新」拉到最前面，本 App 的界面
+      那时被盖住了，只有系统浮窗能把进度显示给用户看。
+
+      · 这个权限不是硬前置：没有它解析照样跑，只是进度看不见，
+        结果仍然会回到本页（见 OverlayProgress 的注释）。
+      · 它是 API 23+ 的运行时授权，用户要在系统设置里
+        「显示在其他应用上层」打开，设置页会提示。
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:label="@string/app_name"

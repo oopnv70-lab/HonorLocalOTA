@@ -13,6 +13,9 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
+import java.io.File;
+import java.io.FileOutputStream;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
@@ -249,11 +252,82 @@ ResolvedTargets rt = resolveTargets(cl, param);
             }
             log(Log.INFO, TAG, sb.toString());
 
+            // 把这一轮的定位结果写成报告，供模块 App 读取显示。
+            //
+            // 为什么必须在这里写：定位只能在本进程做（宿主 APK 路径和 ClassLoader 在这里是白送的），
+            // 而用户要看结果的界面在模块 App 里。两个进程之间只能靠文件，见 TargetReport 的注释。
+            //
+            // 写败不影响功能：这一步只是把已经算出来的东西留个副本，不参与 hook 决策。
+            writeProbeReport(rt, appTag);
         } catch (Throwable e) {
             // 连解析器都造不出来。这时 all 为空，各 hook 会各自回落到硬编码。
             log(Log.ERROR, TAG, "目标解析整体失败，全部回落到硬编码: " + e);
         }
         return rt;
+    }
+
+    /**
+     * 把本轮定位结果写成报告文件，供模块 App 读取显示。
+     *
+     * ── 为什么写在这里而不是模块 App 里 ──
+     *   定位要用的两样东西——宿主 APK 路径、宿主 ClassLoader——
+     *   只在被注入的宿主进程里才是白送的。模块 App 那边要自己拿，
+     *   既会被 Android 11+ 的包可见性过滤挡住，也拿不到宿主 ClassLoader
+     *   来复核类名。所以定位在这里做完，结果留一份给 App 读。
+     *
+     * ── 为什么用 TargetCache 的同目录 ──
+     *   /data/local_ota 的标签是 local_ota_file，本进程（platform_app_all）
+     *   可写、模块 App 走 root 可读。这是本模块唯一不需要额外授权的通道。
+     *
+     * ── 失败绝不影响功能 ──
+     *   报告只是「给人看的证据」，不参与任何 hook 决策。
+     *   写不进去最多是界面少一份报告，所有 hook 照旧，所以整块吞异常。
+     */
+    private void writeProbeReport(ResolvedTargets rt, String appTag) {
+        try {
+            if (rt == null) {
+                return;
+            }
+            File dst = new File(TargetReport.PATH);
+            File dir = dst.getParentFile();
+            if (dir != null && !dir.exists()) {
+                // 正常情况由 init 建好；这里兜底，失败也不报错。
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+            String body = TargetReport.encode(appTag, rt.all);
+            // 先写临时文件再改名：模块 App 那边是按「# at= 变新了」来判断
+            // 这份报告是不是本轮写的，读到半截文件会判成没写。
+            File tmp = new File(TargetReport.PATH + ".tmp");
+            FileOutputStream out = new FileOutputStream(tmp);
+            try {
+                out.write(body.getBytes("UTF-8"));
+                out.flush();
+            } finally {
+                try {
+                    out.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            if (!tmp.renameTo(dst)) {
+                // 某些实现下 rename 覆盖已存在文件会失败，退化为直接写。
+                FileOutputStream direct = new FileOutputStream(dst);
+                try {
+                    direct.write(body.getBytes("UTF-8"));
+                    direct.flush();
+                } finally {
+                    try {
+                        direct.close();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
+            log(Log.INFO, TAG, "定位报告已写入 " + TargetReport.PATH);
+        } catch (Throwable e) {
+            log(Log.WARN, TAG, "写定位报告失败（不影响功能）: " + e);
+        }
     }
 
     /**
