@@ -389,64 +389,89 @@ final class TargetResolver {
             return toResolved(list.get(0), "dexkit");
         }
 
-        // ── 类内仍有多个候选：用「方法体里用到了哪个字段」再收一次 ──
+        // ── 类内仍有多个候选：用「方法体里调用了哪个方法」再收一次 ──
         // 实测动机：CHECK_SUM 定位到 l5.b 之后，光按「void + 0 参」
         // 在这个类里会命中 8 个方法（q/D/E/J/K/m/n/p），只能靠语义再筛。
-        // target.shape 里带的自有字段名就是这一步的判据（见 HookTarget）。
-        List<MethodData> afterField = narrowByDeclaredClassField(b, cd, target, list);
-        if (afterField.size() == 1) {
-            return toResolved(afterField.get(0), "dexkit");
+        // target.shape 里带的方法名就是这一步的判据（见 HookTarget）。
+        List<MethodData> afterInvoke = narrowByInvokedMethod(b, cd, target, list);
+        if (afterInvoke.size() == 1) {
+            return toResolved(afterInvoke.get(0), "dexkit");
         }
         Log.w(TAG, target.label + " 类 " + cd.getName() + " 内方法 " + list.size()
-                + " 个，按字段收窄后 " + afterField.size() + " 个，不唯一");
+                + " 个，按被调用方法收窄后 " + afterInvoke.size() + " 个，不唯一");
         return null;
     }
 
     /**
-     * 在给定类内，把候选方法再按「是否读写某个自有字段」筛一遍。
+     * 在给定类内，把候选方法再按「方法体里调用了某个方法」筛一遍。
      *
-     * 判据来自 HookTarget.shape.uniqueField，那个字段是实测枚举出来的：
-     * 同一个类里 8 个 void 无参方法，只有一个会碰它。
+     * ── 判据为什么是方法名而不是字段名 ──
+     *   HookTarget.shape.uniqueInvoke 填的是未被混淆的名字
+     *   （DependCheckInfo.getHasSelfNewVersion），换版本不会变。
+     *   字段名是混淆产物，拿它当锚点等于把不确定性换了个地方，没用。
      *
-     * 实现上直接问 DexKit「哪些方法用了这个字段」，再做交集合，
-     * 而不是自己解析指令流——后者要处理 invoke 的寄存器，
-     * 容易在 smali 细节上出错，而这些事 DexKit 已经在 native 层做完了。
+     * ── API 怎么调（查过 DexKit 源码，不是试出来的）──
+     *   MethodMatcher.kt 里有两个重载，形参名写得很清楚：
+     *     addInvoke(methodDescriptor: String)   ← 要完整描述符
+     *                                                 "Ljava/lang/String;->length()I"
+     *     addInvoke(invokeMethod: MethodMatcher) ← 收对象，可以按名字匹配
+     *   官方注释给的例子就是 addInvoke(MethodMatcher().name("length"))，
+     *   即按方法名匹配、不需要描述符。所以这里必须走「收对象」那个重载。
+     *
+     *   注意：不能图省事写 addInvoke("getHasSelfNewVersion")。
+     *   String 那个重载会把它当描述符丢给 FieldMatcher/MethodMatcher(String)
+     *   去解析，匹配不到任何东西，静默返回空——这正是上一版
+     *   addUsingField("o") 失败的原因，形参名就叫 fieldDescriptor。
+     *
+     * 收窄是自己做交集，不是让 DexKit 一次算完：先把「谁调用了它」查出来，
+     * 再跟按签名得到的候选求交，这样中途能打日志，出问题知道卡在哪。
      */
-    private List<MethodData> narrowByDeclaredClassField(DexKitBridge b, ClassData cd,
-                                                        HookTarget target,
-                                                        MethodDataList candidates) {
+    private List<MethodData> narrowByInvokedMethod(DexKitBridge b, ClassData cd,
+                                                    HookTarget target,
+                                                    MethodDataList candidates) {
         List<MethodData> out = new ArrayList<>(candidates);
-        String field = target.shape == null ? null : target.shape.uniqueField;
-        if (field == null || field.isEmpty()) {
+        String invoked = target.shape == null ? null : target.shape.uniqueInvoke;
+        if (invoked == null || invoked.isEmpty()) {
             return out;
         }
         try {
-            MethodMatcher fm = MethodMatcher.create();
-            fm.declaredClass(cd.getName());
-            fm.addUsingField(field);
-            MethodDataList users = b.findMethod(FindMethod.create().matcher(fm));
+            // declaredClass 限定在同一个类里，避免别处同名方法把结果撑大。
+            MethodMatcher mm = MethodMatcher.create();
+            mm.declaredClass(cd.getName());
+            // 按名字匹配被调用者。name() 收的就是纯方法名（不是描述符），
+            // 官方 MethodMatcher.kt 里的例子就是 name("length")。
+            mm.addInvoke(MethodMatcher.create().name(invoked));
+            MethodDataList users = b.findMethod(FindMethod.create().matcher(mm));
             if (users == null || users.isEmpty()) {
-                Log.w(TAG, target.label + " 没有任何方法用到字段 " + field);
+                Log.w(TAG, target.label + " 类 " + cd.getName()
+                        + " 里没有任何方法调用 " + invoked);
                 return new ArrayList<>();
             }
             java.util.Set<String> keep = new java.util.HashSet<>();
             for (MethodData md : users) {
-                keep.add(md.getName() + "(" + md.getParamTypeNames() + ")"
-                        + md.getReturnTypeName());
+                keep.add(methodKey(md));
             }
             List<MethodData> filtered = new ArrayList<>();
             for (MethodData md : out) {
-                String key = md.getName() + "(" + md.getParamTypeNames() + ")"
-                        + md.getReturnTypeName();
-                if (keep.contains(key)) {
+                if (keep.contains(methodKey(md))) {
                     filtered.add(md);
                 }
             }
+            if (filtered.size() == 1) {
+                Log.i(TAG, target.label + " 按调用 " + invoked + " 收窄到 "
+                        + filtered.get(0).getName());
+            }
             return filtered;
         } catch (Throwable t) {
-            Log.w(TAG, target.label + " 按字段收窄出错，保留原候选: " + t);
+            Log.w(TAG, target.label + " 按被调用方法收窄出错，保留原候选: " + t);
             return out;
         }
+    }
+
+    /** 判断两个 MethodData 是不是同一个方法用的键。 */
+    private String methodKey(MethodData md) {
+        return md.getDeclaredClassName() + "#" + md.getName()
+                + "(" + md.getParamTypeNames() + ")" + md.getReturnTypeName();
     }
 
     /**

@@ -111,14 +111,27 @@ final class HookTarget {
         final boolean requireAbstract;
 
         /**
-         * 类内仍需进一步筛选时用的字段名。null 表示不用这一步。
+         * 类内仍需进一步筛选时用的「被调用方法名」。null 表示不用这一步。
          *
          * 用途：定位到类之后，光靠方法签名可能还剩好几个候选
          * （例如 l5.b 里有 8 个 void 无参方法），这时要求
-         * 「方法体里必须读或写这个字段」把它们分开。
-         * 选字段的标准是实测出来的唯一性——同一个类里只有一个方法碰它。
+         * 「方法体里必须调用这个方法的类的方法」把它们分开。
+         *
+         * ── 为什么这里放方法名，而不是字段名 ──
+         *   一开始写的是「必须碰某个字段」，填的是 this.o。
+         *   但 o 是混淆后的字段名，和 l5.b、p 一样是这一次编译的产物，
+         *   换版本就变——拿它当锚点，等于把不确定性从类名挪到了字段名，
+         *   不配叫「跨版本可用」。
+         *
+         *   这里改填**未被混淆**的名字。原始类 DependCheckInfo 的包名和方法名
+         *   都是完整的（com.hihonor.android.hnouc.check.model.checkinfo），
+         *  getHasSelfNewVersion 这种取值方法带明确语义，ROM 改混淆时不会动
+         *  它——动了就要改业务代码。全 dex 里它只出现两次：
+         *  一次是它自己的定义，另一次就是 l5.b.p() 里那次调用。
+         *  所以「调用了 getHasSelfNewVersion」= p() 的语义指纹，
+         *  和 #R 用 PHASE03、#V6 用 hn_new_system_update 是同一级别的可靠度。
          */
-        final String uniqueField;
+        final String uniqueInvoke;
 
         StructShape(String hasFieldOfType, int minBooleanFields, int minFields,
                     String superClassNotObject) {
@@ -132,13 +145,13 @@ final class HookTarget {
         }
 
         StructShape(String hasFieldOfType, int minBooleanFields, int minFields,
-                    String superClassNotObject, boolean requireAbstract, String uniqueField) {
+                    String superClassNotObject, boolean requireAbstract, String uniqueInvoke) {
             this.hasFieldOfType = hasFieldOfType;
             this.minBooleanFields = minBooleanFields;
             this.minFields = minFields;
             this.superClassNotObject = superClassNotObject;
             this.requireAbstract = requireAbstract;
-            this.uniqueField = uniqueField;
+            this.uniqueInvoke = uniqueInvoke;
         }
 
         static StructShape none() {
@@ -164,10 +177,14 @@ final class HookTarget {
      * ── p() 在类内怎么唯一确定 ──
      *   l5.b 里有 8 个 void 无参方法（q/D/E/J/K/m/n/p），
      *   光按「void + 0 参」在这个类里找会命中 8 个。
-     *   所以额外要求：方法必须碰 this.o 字段。
-     *   实测 this.o 只在一处被赋值，就在 p() 里
-     *   （this.o = this.a.getHasSelfNewVersion()），
-     *   所以「用到了 o 字段的 void 无参方法」在这个类里唯一。
+     *   所以再加一条：方法体里必须调用 DependCheckInfo.getHasSelfNewVersion()。
+     *
+     *   为什么挑这个方法：它是 DependCheckInfo 上的取值方法，
+     *   而 DependCheckInfo 这个类**没被混淆**（包名方法名都完整）。
+     *   全 dex 里 getHasSelfNewVersion 只出现两次：
+     *   一次是它自己的定义，另一次就是 p() 里那次调用
+     *   （this.o = this.a.getHasSelfNewVersion()）。
+     *   所以「调用了 getHasSelfNewVersion」在 l5.b 内唯一指向 p()。
      */
     static final HookTarget CHECK_SUM = new HookTarget(
             "check_sum",
@@ -175,7 +192,7 @@ final class HookTarget {
             "void",
             new String[]{},   // 无参 void，太宽，全靠结构层
             new String[]{},
-            new StructShape("DependCheckInfo", 9, 16, null, true, "o"),
+            new StructShape("DependCheckInfo", 9, 16, null, true, "getHasSelfNewVersion"),
             "l5.b#p");
 
     /**
