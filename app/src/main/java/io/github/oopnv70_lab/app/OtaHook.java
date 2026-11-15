@@ -4,9 +4,14 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -107,6 +112,26 @@ public class OtaHook extends XposedModule {
     /** 当前正在显示的面板，同一时刻最多一个。 */
     private static volatile PanelView sPanel;
 
+    /**
+     * 本次进程的定位结果，供面板展示。
+     *
+     * 为什么放 static：面板由悬浮按钮按需创建，创建时机晚于 hook 安装，
+     * 需要把「已解析出什么」带给面板。它只写一次（onPackageReady 里），
+     * 之后只读，因此不需要同步。
+     */
+    private static volatile ResolvedTargets sTargets;
+
+    /**
+     * 悬浮入口。挂在 OUC 的 Activity 上。
+     *
+     * ── 为什么必须有它 ──
+     *   原版「本地更新」菜单项在运行时被 OUC 自己隐藏了，所以
+     *   kh.l.K() 永远不会被调用，只靠 hook K() 的话面板永远出不来。
+     *   用户点不到的东西等于不存在——这是本模块之前最根本的缺口。
+     *   这里改成自己往 OUC 界面挂一个常驻按钮，用户点它打开面板。
+     */
+    private static volatile TextView sEntry;
+
     private volatile boolean hooked;
 
     @Override
@@ -131,7 +156,13 @@ public class OtaHook extends XposedModule {
         // 这一步替代了原先写死在常量里的六个混淆名。
         // 解析器内部按「缓存 → DexKit → 硬编码 → 失败」四级取，
         // 每个目标独立，任何一个失败都不影响其余。
-        ResolvedTargets rt = resolveTargets(cl, param);
+ResolvedTargets rt = resolveTargets(cl, param);
+        sTargets = rt;
+
+        // 悬浮入口：OUC 的 Activity 每次走到前台都挂一次。
+        // 放在最前面做，因为它不依赖任何定位结果——即使六个目标全失败，
+        // 用户也应该能点开面板看到"哪个目标没定位到"，而不是什么都点不到。
+        installEntryHook();
 
         // 六件事互相独立，不能因为一件挂不上就放弃其余：
         //   hookK/hookActivityResult → 本地更新入口（面板投放）
@@ -264,6 +295,11 @@ public class OtaHook extends XposedModule {
         return Const.PKG_OUC + ":0";
     }
 
+    /** 供面板读取本次定位结果。未解析时返回 null。 */
+    static ResolvedTargets targets() {
+        return sTargets;
+    }
+
     /**
      * 六个目标的解析结果集合。
      *
@@ -292,6 +328,11 @@ public class OtaHook extends XposedModule {
         boolean ok(String id) {
             TargetResolver.Resolved r = all.get(id);
             return r != null && r.className != null;
+        }
+
+        /** 取原始结果，供面板展示。 */
+        TargetResolver.Resolved get(String id) {
+            return all.get(id);
         }
     }
 
@@ -337,6 +378,119 @@ public class OtaHook extends XposedModule {
             log(Log.ERROR, TAG, "挂 " + cn + "." + mn + "(Context) 失败: " + t);
             return false;
         }
+    }
+
+    /**
+     * 挂 OUC 界面生命周期，在界面上放一个常驻按钮。
+     *
+     * ── 为什么同时挂两个方法 ──
+     *   这两个都是「Activity 已经能显示」的信号，但都有被原版重写的可能：
+     *     · onResume 是 protected，OUC 的页面基本都会重写它
+     *       （要刷新数据、打点），重写后基类实现不再被调用，就挂不到；
+     *     · onWindowFocusChanged 是 public，重写它的 App 少得多，
+     *       但也不是零。
+     *   两个都挂，任意一个触发就补上，覆盖面最大。
+     *   attachEntry 自身是幂等的（用 view 的 parent 判重），
+     *   重复触发不会挂出两个按钮。
+     *
+     * ── 为什么不挂 onCreate ──
+     *   onCreate 之后原版常会再 setContentView，会把我们挂的 view 一起清掉。
+     *   而且 Activity 被系统回收后恢复不会重走 onCreate。
+     */
+    private void installEntryHook() {
+        hookEntryTrigger("onResume", false);
+        hookEntryTrigger("onWindowFocusChanged", true);
+    }
+
+    /**
+     * 挂一个生命周期方法作为「界面可显示」的触发点。
+     *
+     * @param name      方法名
+     * @param hasArg    是否需要带一个 boolean 参数（onWindowFocusChanged）
+     */
+    private void hookEntryTrigger(String name, boolean hasArg) {
+        try {
+            Method m = hasArg
+                    ? Activity.class.getDeclaredMethod(name, boolean.class)
+                    : Activity.class.getDeclaredMethod(name);
+
+            hook(m).intercept(chain -> {
+                // 先让原版跑完：它可能在这个方法里做 setContentView、
+                // 恢复状态等动作，我们要挂在它做完之后，否则会被清掉。
+                Object ret = chain.proceed();
+                Object self = chain.getThisObject();
+                if (self instanceof Activity) {
+                    try {
+                        attachEntry((Activity) self);
+                    } catch (Throwable t) {
+                        log(Log.WARN, TAG, "挂悬浮入口失败: " + t);
+                    }
+                }
+                return ret;
+            });
+            log(Log.INFO, TAG, "已挂 Activity." + name + "，悬浮入口触发点就绪");
+        } catch (Throwable t) {
+            // 一个触发点挂不上还有另一个，不算致命。
+            log(Log.WARN, TAG, "挂 Activity." + name + " 失败（另一个触发点仍可用）: " + t);
+        }
+    }
+
+    /**
+     * 把入口按钮加进 Activity 的 content 层。
+     *
+     * 不挂到某个具体布局里：OUC 的首页布局随版本变化，写死 id 会失效。
+     * 直接挂 android.R.id.content，位置用 layout_gravity 定，
+     * 这样不依赖任何原版布局结构。
+     */
+    private static void attachEntry(Activity act) {
+        String name = act.getClass().getName();
+        // 只挂在 OUC 自己的界面上，不污染它的系统弹窗/选择器等临时页面。
+        if (!name.startsWith(Const.PKG_OUC)) {
+            return;
+        }
+        ViewGroup content = act.findViewById(android.R.id.content);
+        if (content == null) {
+            return;
+        }
+        // 已经在树上就不再添加。用 parent 判断，见 installEntryHook 的注释。
+        TextView old = sEntry;
+        if (old != null && old.getParent() == content) {
+            return;
+        }
+
+        TextView btn = new TextView(act);
+        btn.setText("本地更新");
+        btn.setTextSize(13);
+        btn.setTextColor(0xFFFFFFFF);
+        btn.setGravity(Gravity.CENTER);
+        int padH = (int) (18 * act.getResources().getDisplayMetrics().density);
+        int padV = (int) (9 * act.getResources().getDisplayMetrics().density);
+        btn.setPadding(padH, padV, padH, padV);
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFF2A6DF4);
+        bg.setCornerRadius(999f);
+        btn.setBackground(bg);
+        btn.setElevation(8f);
+
+        btn.setOnClickListener(v -> {
+            try {
+                showPanel(act);
+            } catch (Throwable t) {
+                Log.e(TAG, "打开面板失败", t);
+            }
+        });
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.gravity = Gravity.BOTTOM | Gravity.END;
+        int margin = (int) (24 * act.getResources().getDisplayMetrics().density);
+        lp.setMargins(margin, margin, margin, margin + (int) (56 * act.getResources()
+                .getDisplayMetrics().density));
+        content.addView(btn, lp);
+
+        sEntry = btn;
     }
 
     /**
@@ -942,7 +1096,7 @@ public class OtaHook extends XposedModule {
     }
 
     /** 把面板挂到承载它的 Activity 上，同一时刻只保留一个。 */
-    private void showPanel(Activity act) {
+    private static void showPanel(Activity act) {
         PanelView old = sPanel;
         if (old != null) {
             try {
@@ -955,6 +1109,6 @@ public class OtaHook extends XposedModule {
         PanelView p = new PanelView(act);
         p.show();
         sPanel = p;
-        log(Log.INFO, TAG, "面板已显示");
+        Log.i(TAG, "面板已显示");
     }
 }

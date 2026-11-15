@@ -372,6 +372,28 @@ final class PanelView extends FrameLayout {
             sb.append("  写入后将命名为 ").append(normalize(pickedName)).append('\n');
         }
 
+        // ── 定位状态 ──
+        // 这一段是「用户点开就能看到适配情况」的入口。
+        // 之前没有入口，这些东西只写在 logcat 里，用户根本看不到，
+        // 也就无法判断模块到底有没有工作。
+        sb.append("\n目标定位\n");
+        OtaHook.ResolvedTargets rt = OtaHook.targets();
+        if (rt == null) {
+            sb.append("  （尚未解析）\n");
+        } else {
+            for (HookTarget t : HookTarget.ALL) {
+                TargetResolver.Resolved r = rt.get(t.id);
+                sb.append("  ").append(t.label).append('\n');
+                if (r == null || r.className == null) {
+                    sb.append("    未定位 → 该功能不可用\n");
+                } else {
+                    sb.append("    ").append(r.className).append('#')
+                            .append(r.methodName).append("  [").append(r.source)
+                            .append("]\n");
+                }
+            }
+        }
+
         // 顺便列出目标目录里已经有的包，便于判断上次有没有写成功。
         String[] existing = dir.list();
         sb.append("\n目标目录现有\n");
