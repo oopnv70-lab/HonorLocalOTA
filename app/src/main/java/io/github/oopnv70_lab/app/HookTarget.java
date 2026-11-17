@@ -333,9 +333,70 @@ final class HookTarget {
             StructShape.none(),
             "ee.b#run");
 
+    /**
+     * 八、资源补丁安装总入口：Install.i()
+     *
+     * ── 为什么补丁包不走「屏蔽系统更新」那条链路 ──
+     *   「屏蔽更新」的 hook 挂在 l5.b.p()，而那里只处理 iA == 2/4/6/15/21
+     *   这几种组件类型。补丁包的 versionPackageType 是 18，不在其中，
+     *   所以它完全绕开了屏蔽链路。
+     *
+     *   补丁实际走的是另一条链路（资源更新，DataUpdateModule）：
+     *     DataUpdateService.B0()  → 分流：不是 50（多包）也不是 15（参数）
+     *                        → pc.x.f()   — 下载
+     *     DataUpdateService.Q0() → 分流：不是 15
+     *                        → pc.x.i()   — 安装   ── 本目标
+     *       pc.x.i() → qc.g（InstallScheduler）
+     *            → qc.c.a()（InstallActionChain）
+     *            → rc.i → rc.a → rc.l → rc.m → rc.k → rc.e → rc.b → rc.h
+     *               （Auth → VerifySign → VerifyVersion → Unzip → Merge → EffectiveFile → Notify）
+     *
+     *   它是「开始安装」的唯一入口，在这里拦下来就不会有任何一步装置动作。
+     *
+     * ── 特征 ──
+     *   方法体含 "install start, callProcessName: " 这句日志原文，
+     *   全 dex 里只出现一次（仅 pc/x.java）。签名 (Ljava/lang/String;Ljava/util/List;Luc/c;)V。
+     */
+    static final HookTarget RES_INSTALL_START = new HookTarget(
+            "res_install_start",
+            "资源补丁安装总入口",
+            "void",
+            new String[]{"java.lang.String", "java.util.List", "uc.c"},
+            new String[]{"install start, callProcessName"},
+            StructShape.none(),
+            "pc.x#i");
+    /**
+     * 九、补丁文件生效：EffectiveFileAction.b()
+     *
+     * ── 为什么还要再拦一道 ──
+     *   上一个目标拦的是「开始安装」，但代码里还有一条路径会直接调资源安装链：
+     *   pc.x.m() → pc.x.f() → 重建链条
+     *   以及 DataUpdateService.B0() 里的“恢复未完成任务”路径，
+     *   它们调的是 pc.x.f()（下载）而不是 pc.x.i()（安装），
+     *   但它们最终都会拉起 qc.g（InstallScheduler）。
+     *
+     *   而 rc.b（EffectiveFileAction）是整条链里唯一真正把文件
+     *   rename 到生效目录（/data/res/... 或 /data/vendor/res/...）的那一步，
+     *   它返回的是 qc.b.a（成功）/ qc.b.b（失败）。
+     *   在这里拦下来，即使前面的入口被绕过，也不会有文件被放到生效位置。
+     *
+     * ── 特征 ──
+     *   方法体含 "encrypt file not exist" 这个错误码文案（全 dex 仅 rc/b.java 与 ad/f.java，
+     *   ad 是新的多包链 ad.*，不是我们要拦的 type18 单包链）。
+     *   额外用类型限定只能匹配 qc.b 的子类。
+     */
+    static final HookTarget RES_INSTALL_EFFECTIVE = new HookTarget(
+            "res_install_effective",
+            "补丁文件生效（底层兜底）",
+            null,
+            new String[]{"com.hihonor.basedata.bl.NewVersionComponent", "qc.c"},
+            new String[]{"encrypt file not exist"},
+            StructShape.none(),
+            "rc.b#b");
     /** 需要动态定位的全部 OUC 侧目标。 */
     static final HookTarget[] ALL = {
             CHECK_SUM, PKG_TYPE, CHECK_GROUP, TRIAL_RENDER, BADGE_COUNT,
-            DOWNLOAD_START, DOWNLOAD_TASK
+            DOWNLOAD_START, DOWNLOAD_TASK,
+            RES_INSTALL_START, RES_INSTALL_EFFECTIVE
     };
 }

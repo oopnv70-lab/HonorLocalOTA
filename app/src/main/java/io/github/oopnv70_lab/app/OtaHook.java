@@ -155,7 +155,9 @@ public class OtaHook extends XposedModule {
         //   hookBadge                → OUC 自己界面内的角标
         //   hookBadgeCount           → 设置页那个红点（写 Secure 表时压成 0）
         //   hookDownloadStart        → 屏蔽生效时不允许发起更新包下载
-        //   hookDownloadTask         → 兜底，真跑起来的下载线程直接结束
+        //   hookDownloadTask         → 兜底
+        //   hookResInstallStart      → 资源补丁的安装总入口（不走屏蔽链路）
+        //   hookResInstallEffective  → 补丁文件生效的底层兜底，真跑起来的下载线程直接结束
         boolean s = hookCheckSum(cl, rt);
         boolean f = hookPackageType(cl, rt);
         boolean g = hookCheckGroup(cl, rt);
@@ -164,8 +166,10 @@ public class OtaHook extends XposedModule {
         boolean c = hookBadgeCount(cl, rt);
         boolean d = hookDownloadStart(cl, rt);
         boolean e = hookDownloadTask(cl, rt);
-
-        if (s || f || g || t || b || c || d || e) {
+        // 资源补丁的安装链路与「屏蔽系统更新」完全不交叉，必须单独拦。
+        boolean h = hookResInstallStart(cl, rt);
+        boolean i = hookResInstallEffective(cl, rt);
+        if (s || f || g || t || b || c || d || e || h || i) {
             hooked = true;
         }
     }
@@ -894,6 +898,185 @@ public class OtaHook extends XposedModule {
      *   已经落一半的文件不会被删（那是 OUC 自己的清理逻辑），
      *   但也不会有新数据写进去。
      */
+    /**
+     * 拦下资源补丁的安装总入口（Install.i）。
+     *
+     * ── 为什么需要单独拦 ──
+     *   「屏蔽系统更新」的 hook 挂在 l5.b.p()，而那里只处理
+     *   iA == 2/4/6/15/21 这几种组件类型。补丁包的
+     *   versionPackageType 是 18（SPM-SM8750-NPU-1B-CM-RSC 这类 NPU 资源补丁），
+     *   不在其中，所以它完全绕开了屏蔽链路。
+     *
+     *   它走的是另一条链路（资源更新）：
+     *     DataUpdateService.Q0() → 不是 15（参数更新）→ pc.x.i()
+     *       → qc.g（InstallScheduler）→ qc.c.a（InstallActionChain）
+     *       → rc.i → rc.a→rc.l→rc.m→rc.k→rc.e→rc.b→rc.h
+     *
+     * ── 为什么直接 return 而不是调回调 ──
+     *   被拦下的是「开始安装」这一步，后面的校验、解压、合并、生效全部不会执行。
+     *   但原方法有一个参数是 uc.c（安装回调），不回调的话，
+     *   UI 侧的状态机会停在「安装中」。
+     *   所以这里通过回调告知失败原因，让 UI 落回「未安装」而不是卡住。
+     *
+     * ── 开关 ──
+     *   用 isBlockEffective()：屏蔽关掉、或强制全量包开着时原样放行。
+     *   强制全量包开着时用户本意就是要把包装上，此时拦下来会破坏功能本身。
+     */
+    private boolean hookResInstallStart(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.RES_INSTALL_START.id, Const.CLS_RES_INSTALL_START);
+        String mn = rt.mth(HookTarget.RES_INSTALL_START.id, Const.MTH_RES_INSTALL_START);
+        try {
+            Class<?> c = Class.forName(cn, false, cl);
+            // 参数类型 uc.c 是内部接口，名字不可靠，
+            // 所以按「第 3 个参数是 uc.c」来找，不写死类名。
+            Method m = findMethodByParamCount(c, 3, "uc.c");
+            if (m == null) {
+                log(Log.WARN, TAG, "在 " + cn + " 里没找到安装总入口，跳过这一道");
+                return false;
+            }
+            m.setAccessible(true);
+            hook(m).intercept(chain -> {
+                if (!SwitchStore.isBlockEffective()) {
+                    return chain.proceed();
+                }
+                log(Log.INFO, TAG, "屏蔽生效，已拦下资源补丁安装: " + cn + "#" + mn);
+                // 回调：安装结果（boolean 成功、String 路径、int 错误码、String 信息）。
+                // 返回“失败”让 UI 回到可重试的状态，而不是卡在安装中。
+                Object cb = chain.getArgs().get(2);
+                try {
+                    java.lang.reflect.Method cbm = cb.getClass().getMethod(
+                            "a", boolean.class, String.class, int.class, String.class);
+                    cbm.setAccessible(true);
+                    cbm.invoke(cb, Boolean.FALSE, "", -338, "blocked by HonorLocalOTA");
+                } catch (Throwable ignore) {
+                    // 回调失败不影响拦截本身，安装不会发生。
+                }
+                return null;   // 原方法返回 void
+            });
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn
+                    + "，屏蔽生效时资源补丁不会被安装");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
+            return false;
+        }
+    }
+    /**
+     * 拦下补丁文件的生效动作（EffectiveFileAction.b）。
+     *
+     * ── 为什么还要再拦一道 ──
+     *   上一个目标拦的是「开始安装」，但代码里还有其他路径会直接拉起安装链：
+     *   pc.x.m() → pc.x.f()（重建任务）、DataUpdateService.B0() 里的「恢复未完成任务」。
+     *   它们不走 pc.x.i()，但最终都会拉起 qc.g（InstallScheduler）。
+     *
+     *   rc.b（EffectiveFileAction）是整条链里唯一真正把文件 rename 到
+     *   生效目录（/data/res/... 或 /data/vendor/res/...）的那一步。
+     *   在这里拦下来，即使前面的入口被绕过，也不会有文件被放到生效位置。
+     *
+     * ── 为什么返回「失败」而不是 null ──
+     *   这个方法的返回值是 qc.b 的内部成功/失败封装类（dex 里是 qc.b$b），
+     *   返回一个「失败」对象，让整条链按失败分支结束（不会再走 NotifyPreload），
+     *   也不会留下「数据层认为已安装」的残留状态。
+     */
+    private boolean hookResInstallEffective(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.RES_INSTALL_EFFECTIVE.id, Const.CLS_RES_INSTALL_EFFECTIVE);
+        String mn = rt.mth(HookTarget.RES_INSTALL_EFFECTIVE.id, Const.MTH_RES_INSTALL_EFFECTIVE);
+        try {
+            Class<?> c = Class.forName(cn, false, cl);
+            Class<?> compCls = Class.forName(
+                    "com.hihonor.basedata.bl.NewVersionComponent", false, cl);
+            // 第二个参数是 qc.c 的内部接口 qc.c$a，
+            // 内部类名带编号，按前缀匹配不写死。
+            Method m = null;
+            for (Method mm : c.getDeclaredMethods()) {
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length != 2 || !ps[0].equals(compCls)) {
+                    continue;
+                }
+                if (ps[1].getName().startsWith("qc.c$")) {
+                    m = mm;
+                    break;
+                }
+            }
+            if (m == null) {
+                log(Log.WARN, TAG, "在 " + cn + " 里没找到生效方法，跳过这一道");
+                return false;
+            }
+            m.setAccessible(true);
+            // “失败对象”的静态工厂：在返回类 qc.b$b 上找 (int,String)。
+            Class<?> ret = m.getReturnType();
+            Method fail = findStaticFactory(ret, int.class, String.class);
+            if (fail == null) {
+                log(Log.WARN, TAG, "找不到失败对象的静态工厂，跳过这一道");
+                return false;
+            }
+            fail.setAccessible(true);
+            final Object failObj = fail.invoke(null, Integer.valueOf(-338),
+                    "blocked by HonorLocalOTA");
+            hook(m).intercept(chain -> {
+                if (!SwitchStore.isBlockEffective()) {
+                    return chain.proceed();
+                }
+                log(Log.INFO, TAG, "屏蔽生效，已拦下补丁文件生效: " + cn + "#" + mn);
+                // 返回「失败」对象：让整条链按失败分支结束。
+                return failObj;
+            });
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn
+                    + "，补丁文件不会被放到生效目录");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
+            return false;
+        }
+    }
+    /**
+     * 在类里找「参数数量为 n、其中第 k 个参数类的简名以 prefix 开头」的方法。
+     *
+     * ── 为什么不写死内部类名 ──
+     *   uc.c 是内部接口，它的实例会被包成 uc.c$a 这样的内部类，
+     *   而传给方法的参数类是接口本身（uc.c）。
+     *   名字带编号的内部类名是漂移产物，按前缀匹配更稳。
+     */
+    private Method findMethodByParamCount(Class<?> c, int n, String lastParamPrefix) {
+        for (Method mm : c.getDeclaredMethods()) {
+            Class<?>[] ps = mm.getParameterTypes();
+            if (ps.length != n) {
+                continue;
+            }
+            if (lastParamPrefix != null
+                    && !ps[ps.length - 1].getName().startsWith(lastParamPrefix)) {
+                continue;
+            }
+            return mm;
+        }
+        return null;
+    }
+    /**
+     * 在类上找「参数为 (int,String)、返回类型是 target」的静态方法。
+     *
+     * ── 用這个而不是写死 qc.b$b ──
+     *   jadx 把内部类重命名为 C0163b，但 dex 里仍是 qc.b$b，
+     *   而方法的声明返回类就是它。
+     *   直接从被拦方法的返回类反推出来最稳，不依赖内部类名。
+     */
+    private Method findStaticFactory(Class<?> target, Class<?> p0, Class<?> p1) {
+        for (Class<?> owner : new Class<?>[]{target.getEnclosingClass(), target}) {
+            if (owner == null) {
+                continue;
+            }
+            for (Method mm : owner.getDeclaredMethods()) {
+                if (!java.lang.reflect.Modifier.isStatic(mm.getModifiers())) {
+                    continue;
+                }
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 2 && ps[0].equals(p0) && ps[1].equals(p1)
+                        && target.isAssignableFrom(mm.getReturnType())) {
+                    return mm;
+                }
+            }
+        }
+        return null;
+    }
     private boolean hookDownloadTask(ClassLoader cl, ResolvedTargets rt) {
         String cn = rt.cls(HookTarget.DOWNLOAD_TASK.id, Const.CLS_DOWNLOAD_TASK);
         String mn = rt.mth(HookTarget.DOWNLOAD_TASK.id, Const.MTH_DOWNLOAD_TASK);

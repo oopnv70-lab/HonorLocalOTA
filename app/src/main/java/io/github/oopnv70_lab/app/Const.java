@@ -329,6 +329,37 @@ final class Const {
      */
     static final String CLS_SETTINGS_ENTRY = "com.android.settings.HWSettings";
 
+    // ──────────────────────────────────── 资源补丁安装 ─────────────────────────────────────
+    /**
+     * 资源补丁安装总入口所在类。source: pc/x.java（Install）
+     *
+     * 补丁包（versionPackageType == 18，如 NPU 资源补丁）走的是
+     * 资源更新链路，不是「屏蔽系统更新」那条：
+     *   DataUpdateService.Q0() → pc.x.i() → qc.g → qc.c.a() → rc.* 链
+     *
+     * 它不走 l5.b.p()（那里只处理 iA == 2/4/6/15/21），
+     * 所以「屏蔽更新」开关开着也拦不住它。
+     *
+     * 同样只是兜底值，实际类名/方法名由 TargetResolver
+     * 按「方法体含 install start, callProcessName」动态定位。
+     */
+    static final String CLS_RES_INSTALL_START = "pc.x";
+    /** 安装总入口方法名，签名 (Ljava/lang/String;Ljava/util/List;Luc/c;)V。 */
+    static final String MTH_RES_INSTALL_START = "i";
+
+    /**
+     * 补丁文件生效动作所在类。source: rc/b.java（EffectiveFileAction）
+     *
+     * 这是整条安装链里唯一真正把文件 rename 到生效目录
+     * （/data/res/... 或 /data/vendor/res/...）的那一步，
+     * 拦下它就能保证即使前面的入口被绕过，文件也不会被放到生效位置。
+     *
+     * 同样只是兜底值，实际类名/方法名由 TargetResolver
+     * 按「方法体含 encrypt file not exist」动态定位。
+     */
+    static final String CLS_RES_INSTALL_EFFECTIVE = "rc.b";
+    /** 生效方法名，签名 (NewVersionComponent, qc.c$a)qc.b$b。 */
+    static final String MTH_RES_INSTALL_EFFECTIVE = "b";
     private Const() {
     }
 }
