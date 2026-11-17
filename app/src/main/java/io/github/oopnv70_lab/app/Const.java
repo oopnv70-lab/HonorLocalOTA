@@ -201,6 +201,37 @@ final class Const {
      */
     static final String MTH_BADGE = "setBadgeVisible";
 
+    // ─────────────── 更新包下载 ───────────────
+
+    /**
+     * 启动下载的收口方法所在类。source: c6/q.java（NewDownloadEntry）
+     *
+     * 方法 startDownload(boolean) 是全 dex 里所有下载发起路径的唯一汇合点：
+     * 手动点下载、自动下载（AutoCheckService）、COTA（CotaService）、
+     * 开机恢复（LockedBootReceiver → g() → 这里）全部调它。
+     *
+     * 这三处都只是**兜底值**，实际类名/方法名由 TargetResolver 按
+     * 「方法体含 startDownload init 等日志原文」动态定位。
+     */
+    static final String CLS_DOWNLOAD_START = "c6.q";
+
+    /** 启动下载的方法名，签名 (Z)V，public static。 */
+    static final String MTH_DOWNLOAD_START = "h";
+
+    /**
+     * 下载任务线程体所在类。source: ee/b.java（Download，abstract，Runnable）
+     *
+     * 它是所有下载子类（ee.g / ee.i）的公共父类，run() 只在这里定义一次，
+     * 是「真正开始传输」的唯一入口，用作第二层兜底。
+     *
+     * 同样只是兜底值，实际由「方法体含 The thread has been interrupted
+     * and is not allowed to run.」动态定位。
+     */
+    static final String CLS_DOWNLOAD_TASK = "ee.b";
+
+    /** 下载线程的入口方法名，签名 ()V，public。 */
+    static final String MTH_DOWNLOAD_TASK = "run";
+
     // ─────────────── 红点真正的来源 ───────────────
 
     /**

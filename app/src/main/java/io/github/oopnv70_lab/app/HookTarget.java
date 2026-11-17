@@ -160,7 +160,7 @@ final class HookTarget {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // 五个 OUC 侧目标
+    // 七个 OUC 侧目标
     // ══════════════════════════════════════════════════════════════
     /**
      * 一、检查更新汇总：l5.b.p()V → 压掉「有新版本」标志位
@@ -266,8 +266,76 @@ final class HookTarget {
             StructShape.none(),
             "r9.w1#V6");
 
+    /**
+     * 六、下载启动：startDownload
+     *
+     * ── 为什么这里才是「真正不让它下载」的收口 ──
+     *   检查更新只决定「界面上说不说有新版本」，服务器那头照样会把包
+     *   推过来、OUC 照样会把它落盘。要让设备真的不产生更新包，
+     *   必须拦住下载这一步。
+     *
+     *   全 dex 里调这个方法的调用点有 20 多处：
+     *     c6.o（LocalDownloadUtils）4 处、AutoCheckService、
+     *     CotaService、CotaNewVersionDetailsActivity、n7.f、q7.a、
+     *     g7.j、g7.k、s8.c …… 手动点「下载」、自动下载、
+     *     开机后恢复下载、COTA 下载，全部最终落到这一个方法。
+     *   也就是说拦这一个方法，等于同时封掉所有发起路径，
+     *   不需要逐个去堵每个按钮和每个 Receiver。
+     *
+     * ── 特征为什么可靠 ──
+     *   方法体里含 "startDownload init"、"Not eligible for unlocked downloads"
+     *   两句日志原文（全 dex 各只出现 1 次），
+     *   且宿主类里「static void + 仅一个 boolean 参数」的方法只有它一个。
+     *   两个条件叠加，不依赖混淆名。
+     *
+     * ── 局限（必须写清楚）──
+     *   它挡的是「OUC 自己发起下载」。若某个系统组件（update_engine /
+     *   厂商服务）绕过 OUC 直接从服务器取包，不经过这里。
+     *   那条路的兜底是下一个目标 DOWNLOAD_TASK。
+     */
+    static final HookTarget DOWNLOAD_START = new HookTarget(
+            "download_start",
+            "更新包下载启动",
+            "void",
+            new String[]{"boolean"},
+            new String[]{"startDownload init", "Not eligible for unlocked downloads"},
+            StructShape.none(),
+            "c6.q#h");
+
+    /**
+     * 七、下载任务执行：Download.run()（兜底）
+     *
+     * ── 为什么需要第二层 ──
+     *   DOWNLOAD_START 是「发起」层面的收口，但发起之后真正写盘的是
+     *   ee.b（Download，abstract，implements Runnable）：
+     *     run() → d() → 用 okhttp 拉分片、RandomAccessFile 写到
+     *     /data/update/HnOUC/<任务号>/update_base.zip
+     *   只要有任意一条路径绕过 startDownload 直接构造了下载任务，
+     *   这一层就能兜住：run() 一进去就让它结束。
+     *
+     * ── 为什么不是拦 d() 或写文件 ──
+     *   d() 是 protected、被两个子类 ee.g / ee.i 各自覆盖，拦它要拦两处，
+     *   还会漏掉「以后新增子类」的情况。run() 只在 ee.b 定义一次，
+     *   是全部子类的公共入口，也是线程真正被提交执行的那个方法。
+     *   拦写文件则要碰 FileOutputStream/RandomAccessFile，那是全局类，
+     *   会把别的 App 的写文件一起影响——这正是要避免的。
+     *
+     * ── 特征 ──
+     *   方法体含 "The thread has been interrupted and is not allowed to run."
+     *   （全 dex 唯一一处出现这句长串）。签名 ()V、无参。
+     */
+    static final HookTarget DOWNLOAD_TASK = new HookTarget(
+            "download_task",
+            "下载任务执行（兜底）",
+            "void",
+            new String[]{},
+            new String[]{"The thread has been interrupted and is not allowed to run."},
+            StructShape.none(),
+            "ee.b#run");
+
     /** 需要动态定位的全部 OUC 侧目标。 */
     static final HookTarget[] ALL = {
-            CHECK_SUM, PKG_TYPE, CHECK_GROUP, TRIAL_RENDER, BADGE_COUNT
+            CHECK_SUM, PKG_TYPE, CHECK_GROUP, TRIAL_RENDER, BADGE_COUNT,
+            DOWNLOAD_START, DOWNLOAD_TASK
     };
 }

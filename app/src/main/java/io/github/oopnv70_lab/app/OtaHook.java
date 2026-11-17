@@ -64,6 +64,15 @@ import io.github.libxposed.api.XposedModuleInterface;
  *   拦 qg.g.l0(...)，把状态码强制成 10（无尝鲜活动）。
  *   「升级尝鲜」是独立通路，不经过 p()，必须单独处理。
  *
+ * 七、屏蔽生效时不允许下载更新包（hookDownloadStart / hookDownloadTask）
+ *   前面几条都只作用在「界面说不说有新版本」这一层，服务器仍然可以
+ *   把包推过来、OUC 仍然可以把它落盘到 /data/update/HnOUC/。
+ *   要让设备真的不产生更新包，必须拦下载本身。做法见两个方法各自的注释。
+ *
+ *   ⚠ 这两条只拦 OUC 自己发起的下载，不碰任何全局类：
+ *     不 hook 网络库、不 hook FileOutputStream、不 hook DownloadManager。
+ *     别的 App、系统其他模块的下载完全不受影响。
+ *
  * ── 已经删除的功能：版本伪造 ──
  *   曾实现过两套：hook SystemPropertiesEx.get(String,String) 改上报值、
  *   反射改 Build.DISPLAY 改界面显示。两者都实测生效（日志 113+ 次命中、
@@ -131,34 +140,38 @@ public class OtaHook extends XposedModule {
         ClassLoader cl = param.getClassLoader();
         log(Log.INFO, TAG, "onPackageReady: " + param.getPackageName());
 
-        // ── 动态定位五个目标 ──
+        // ── 动态定位七个目标 ──
         // 这一步替代了原先写死在常量里的六个混淆名。
         // 解析器内部按「缓存 → DexKit → 硬编码 → 失败」四级取，
         // 每个目标独立，任何一个失败都不影响其余。
-ResolvedTargets rt = resolveTargets(cl, param);
+        ResolvedTargets rt = resolveTargets(cl, param);
         sTargets = rt;
 
-        // 六件事互相独立，不能因为一件挂不上就放弃其余：
+        // 八件事互相独立，不能因为一件挂不上就放弃其余：
         //   hookCheckSum             → 关掉「检查更新」的新版本提示
         //   hookPackageType          → 强制向服务器要全量包
         //   hookCheckGroup           → 把请求发到正式版本组（全量包收不到更新的根治点）
         //   hookTrialVersion         → 屏蔽生效时尝鲜页不显示新版本
         //   hookBadge                → OUC 自己界面内的角标
         //   hookBadgeCount           → 设置页那个红点（写 Secure 表时压成 0）
+        //   hookDownloadStart        → 屏蔽生效时不允许发起更新包下载
+        //   hookDownloadTask         → 兜底，真跑起来的下载线程直接结束
         boolean s = hookCheckSum(cl, rt);
         boolean f = hookPackageType(cl, rt);
         boolean g = hookCheckGroup(cl, rt);
         boolean t = hookTrialVersion(cl, rt);
         boolean b = hookBadge(cl);
         boolean c = hookBadgeCount(cl, rt);
+        boolean d = hookDownloadStart(cl, rt);
+        boolean e = hookDownloadTask(cl, rt);
 
-        if (s || f || g || t || b || c) {
+        if (s || f || g || t || b || c || d || e) {
             hooked = true;
         }
     }
 
     /**
-     * 解析五个目标的真实类名/方法名。
+     * 解析七个目标的真实类名/方法名。
      *
      * ── 为什么整块包在 try 里 ──
      *   定位是「尽力而为」：libdexkit.so 加载失败、宿主 APK 读不到、
@@ -267,7 +280,7 @@ ResolvedTargets rt = resolveTargets(cl, param);
     }
 
     /**
-     * 五个目标的解析结果集合。
+     * 七个目标的解析结果集合。
      *
      * 为什么单独包一层：hook 方法需要「拿到某个目标，拿不到就用硬编码」，
      * 这个动作在六处都要重复。封装成 get(id, fallbackClass, fallbackMethod) 之后，
@@ -801,6 +814,105 @@ ResolvedTargets rt = resolveTargets(cl, param);
             log(Log.INFO, TAG, "桌面角标已清零: " + (r == null ? "null" : r.getString("result")));
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "清桌面角标失败: " + t);
+        }
+    }
+
+    /**
+     * 挂 startDownload(boolean)，屏蔽生效时不允许发起更新包下载。
+     *
+     * ── 为什么必须加这一条 ──
+     *   hookCheckSum 只是把「有没有新版本」的结论压成 false，让界面
+     *   不提示。但用户如果自己进「软件更新」点检查，或者系统走自动检查
+     *   （AutoCheckService）、COTA、开机恢复（LockedBootReceiver），
+     *   服务器照样会回包，OUC 照样会把它下到 /data/update/HnOUC/。
+     *   要做到「设备上不产生更新包」，只能拦下载。
+     *
+     * ── 为什么这个点是唯一收口 ──
+     *   全 dex 里调 startDownload 的地方 20 多处，全部是这一个方法：
+     *     手动点下载（q7.a / n7.f / CotaNewVersionDetailsActivity）、
+     *     自动下载（AutoCheckService / g7.j / g7.k / s8.c）、
+     *     开机恢复（LockedBootReceiver → c6.q.g() → 这里）、
+     *     COTA（CotaService）。
+     *   拦这里等于一次封掉全部发起路径，不用逐个堵按钮和 Receiver。
+     *
+     * ── 为什么直接 return 而不是改参数 ──
+     *   它没有返回值、只有一个「是否自动触发」的 boolean，改参数没有意义
+     *   （两个取值都会走到下载）。直接不执行原方法就是「这次下载没有发生」，
+     *   OUC 的状态机停在「未下载」，界面会正常显示未下载/可点击，
+     *   不会出现「显示已经下完了、其实磁盘上没有」这种假状态。
+     *
+     * ── 开关 ──
+     *   用 isBlockEffective()：屏蔽关掉、或强制全量包开着时原样放行。
+     *   后者是必须的——用户开全量包就是为了把包下下来装，
+     *   这时候再拦下载会把功能本身弄坏。
+     */
+    private boolean hookDownloadStart(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.DOWNLOAD_START.id, Const.CLS_DOWNLOAD_START);
+        String mn = rt.mth(HookTarget.DOWNLOAD_START.id, Const.MTH_DOWNLOAD_START);
+        try {
+            Class<?> c = Class.forName(cn, false, cl);
+            Method m = c.getDeclaredMethod(mn, boolean.class);
+            m.setAccessible(true);
+            hook(m).intercept(chain -> {
+                if (!SwitchStore.isBlockEffective()) {
+                    return chain.proceed();
+                }
+                // 不 proceed：这次下载直接不发生。
+                // 打日志是为了让「到底是模块拦的、还是你自己点的」可查。
+                log(Log.INFO, TAG, "屏蔽生效，已拦下更新包下载: " + cn + "#" + mn);
+                return null;   // 原方法返回 void
+            });
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn
+                    + "(boolean)，屏蔽生效时不会发起下载");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 挂 Download.run()，兜底：真跑起来的下载线程直接结束。
+     *
+     * ── 为什么在已经有 hookDownloadStart 之后还要这一层 ──
+     *   startDownload 是「发起」的收口，但它假设所有下载都从那里进。
+     *   实际还有两条绕路：
+     *     · 已经存在的下载任务被重新调度（数据库里有未完成任务时，
+     *       线程池直接拿旧任务重跑，不再走一次 startDownload）；
+     *     · 某个厂商/系统组件自己构造下载任务。
+     *   run() 是下载线程真正执行的入口（ee.b 是所有下载子类 ee.g/ee.i
+     *   的公共父类，run() 只在父类定义一次），在这里收口最稳。
+     *
+     * ── 为什么不直接拦 d()（真正的传输方法）──
+     *   d() 是 protected，被两个子类各自覆盖，拦它要拦两处，
+     *   将来新增子类还会漏。run() 一处覆盖全部。
+     *
+     * ── 为什么这里可以安全地直接 return ──
+     *   run() 的语义就是「把这个下载任务跑完」，return 等于任务没跑。
+     *   它不像 V6() 那样还兼职写 Secure 表、发广播——返回就返回了，
+     *   不会留下「数据层认为下完了」的残留。
+     *   已经落一半的文件不会被删（那是 OUC 自己的清理逻辑），
+     *   但也不会有新数据写进去。
+     */
+    private boolean hookDownloadTask(ClassLoader cl, ResolvedTargets rt) {
+        String cn = rt.cls(HookTarget.DOWNLOAD_TASK.id, Const.CLS_DOWNLOAD_TASK);
+        String mn = rt.mth(HookTarget.DOWNLOAD_TASK.id, Const.MTH_DOWNLOAD_TASK);
+        try {
+            Class<?> c = Class.forName(cn, false, cl);
+            Method m = c.getDeclaredMethod(mn);
+            m.setAccessible(true);
+            hook(m).intercept(chain -> {
+                if (!SwitchStore.isBlockEffective()) {
+                    return chain.proceed();
+                }
+                log(Log.INFO, TAG, "屏蔽生效，已拦下下载任务线程: " + cn + "#" + mn);
+                return null;   // 原方法返回 void，线程体不执行
+            });
+            log(Log.INFO, TAG, "已挂 " + cn + "." + mn + "()，下载线程不会真正跑");
+            return true;
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "挂 " + cn + "." + mn + " 失败: " + t);
+            return false;
         }
     }
 

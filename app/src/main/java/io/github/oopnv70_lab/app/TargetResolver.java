@@ -175,7 +175,7 @@ final class TargetResolver {
                 out.put(t.id, resolve(t, cl, apkPath, appTag));
             } catch (Throwable e) {
                 // 单个目标出任何意外都不许影响其它目标：
-                // 用户的六个功能互相独立，一个坏了不该连坐。
+                // 各功能互相独立，一个坏了不该连坐。
                 Log.e(TAG, "解析 " + t.id + " 时抛异常: " + e);
                 out.put(t.id, new Resolved(null, null, new String[0], "none"));
             }
