@@ -15,13 +15,14 @@
 | 源码 | 由 LLM 阅读 `com.hihonor.ouc` 的反编译结果（smali）后编写，再由人工审阅 |
 | README、提交说明、代码注释 | 由 LLM 撰写 |
 | 构建工作流（`.github/workflows/build.yml`） | 由 LLM 编写 |
-| 混淆类名与方法名来源 | LLM 从 smali 提取，**未经过完整的调用链人工复核** |
-| 真机验证范围 | 仅荣耀 AAK-AN00 一台设备 |
+| 混淆类名与方法名来源 | 由 LLM 从 smali/jadx 反编译结果提取，配合 DexKit 语义特征在运行时重新定位 |
+| 真机验证范围 | 仅荣耀 AAK-AN00 一台设备（「软件更新」18.0.3.227 与 18.0.3.230 两个版本） |
 
 具体到功能上，这意味着：
 
-- **hook 目标是「猜」出来的，不是查文档得到的。** `r9.w1.x2()`、`l5.b.p()`、`l5.b.R()`、`qg.g.l0()` 这些名字全部来自对某个特定版本 `com.hihonor.ouc` 的反编译。系统更新一次，它们就可能全部失效，而且失效时**通常没有任何报错**——表现只是「功能不好使了」。
-- **LLM 可能给出听起来很确定、实际是错的结论。** 本项目开发过程中就发生过：把「签名更换」误判为「必须换包名重新上架」，把「LSPosed 作用域未勾选」误判为「进程需要重启」。两者都被人工当场纠正，但说明不要盲信注释里的判断。
+- **hook 目标不全靠写死。** `r9.w1.x2()`、`l5.b.p()`、`l5.b.R()`、`qg.g.l0()`、`r9.w1.V6()` 这些名字来自对特定版本 `com.hihonor.ouc` 的反编译；但模块在运行时用 DexKit 按语义特征（方法签名、协议字符串、未混淆的接口方法名）重新查找它们，所以换版本后通常还能找到。写死的那份名字只在语义查询失败时兜底。
+- **兜底是可见的，不是静默的。** 设置页会逐个目标显示「来源」：`语义定位（跨版本可用）` 表示是运行时查出来的，`写死的名字（换版本会失效）` 表示回落到了硬编码。后者出现就说明该目标的语义特征在这个版本上失效了，需要重新分析。
+- **LLM 可能给出听起来很确定、实际是错的结论。** 本项目开发过程中就发生过：把「签名更换」误判为「必须换包名重新上架」，把「LSPosed 作用域未勾选」误判为「进程需要重启」，把 abl 的压缩容器误判为「加密载荷」。都被人工当场纠正，但说明不要盲信注释里的判断。
 - **`isMinifyEnabled = true`，代码经过 R8 混淆。** 你在 APK 里搜不到源码中的类名，这是正常的，不代表功能缺失。
 
 ### 如果你要基于本仓库做二次开发
@@ -108,7 +109,14 @@
 
 ## 兼容性
 
-在荣耀 AAK-AN00（MagicOS 11 / Android 17）上测试通过，对应「软件更新」版本 2.1.1.1（versionCode 205）。
+在荣耀 AAK-AN00（MagicOS 11 / Android 17）上测试通过。对应「软件更新」：
+预装 **18.0.3.227**（versionCode 180003227），升级后 **18.0.3.230**
+（versionCode 180003230）——两个版本上都验证过目标定位。
+
+目标定位不依赖固定版本号：模块在运行时读取设备上实际生效的 APK，用语义
+特征（方法签名、协议字符串、未混淆的接口方法名）查找 hook 目标。换版本
+后若某个目标找不到，设置页的来源会显示「写死的名字（换版本会失效）」，
+而不会静默失效。
 
 不同机型、不同系统版本的「软件更新」类名与结构可能不同，模块按上述版本实现，未覆盖的情况可能不生效。
 
@@ -120,4 +128,42 @@
 
 ## 许可
 
-AGPL-3.0，详见 [LICENSE](LICENSE)。
+本项目自身采用 **AGPL-3.0**，详见 [LICENSE](LICENSE)。
+
+### 第三方组件
+
+模块不是「纯自己写的」——它依赖并**随 APK 分发**了别人的代码。完整声明见
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)，这里只列结论：
+
+| 组件 | 版本 | 许可 | 是否随 APK 分发 |
+| --- | --- | --- | --- |
+| [DexKit](https://github.com/LuckyPray/DexKit) | 2.3.0 | LGPL-3.0 与 Apache-2.0 双许可 | 是（dex + 4 个 ABI 的 `libdexkit.so`） |
+| [FlatBuffers Java](https://github.com/google/flatbuffers) | 23.5.26 | Apache-2.0 | 是（DexKit 的传递依赖） |
+| [kotlin-stdlib](https://github.com/JetBrains/kotlin) | 见依赖调解 | Apache-2.0 | 是（DexKit 的传递依赖） |
+| [libcxx Prefab](https://github.com/RikkaW/libcxx-prefab) | 1.2.0 | Apache-2.0 | 仅构建期（代码已链接进 `libdexkit.so`） |
+| [libxposed API](https://github.com/libxposed/api) | 102.0.0 | Apache-2.0 | 否（`compileOnly`，运行时由 LSPosed 提供） |
+
+**DexKit 的定位是动态测试的核心**：模块之所以能在换版本后仍然找到 hook
+目标，靠的就是它读 dex 做静态语义查询。它不是可选工具，所以它的许可
+义务必须认真对待。
+
+关于 LGPL-3.0 的静态链接：dex 里的类无法在运行时替换，所以本模块属于
+静态链接。LGPL-3.0 第 4 条 d 项要求提供「能重新链接」的条件，本模块的
+满足方式是**完整公开源码与构建脚本**——fork 本仓库、改
+`gradle/libs.versions.toml` 里的 `dexkit` 版本，就能构建一个替换掉
+DexKit 的版本。这不是空话，路径是通的。
+
+许可全文随 APK 一起分发，在 APK 里可以查到：
+
+```
+META-INF/LICENSE                  本项目 AGPL-3.0
+META-INF/THIRD_PARTY_NOTICES.txt  第三方组件声明
+META-INF/licenses/LGPL-3.0.txt    DexKit
+META-INF/licenses/GPL-3.0.txt     LGPL-3.0 的补充条款
+META-INF/licenses/Apache-2.0.txt  FlatBuffers / kotlin-stdlib / libcxx
+```
+
+### 关于「没有分发荣耀的代码」
+
+本模块不打包、不分发 `com.hihonor.ouc` 的任何字节。它只在运行时读取设备上
+已存在的 APK 做静态分析，不复制其代码，也不把它嵌进自己的产物里。

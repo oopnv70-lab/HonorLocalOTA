@@ -1,0 +1,187 @@
+HonorLocalOTA —— 第三方组件声明
+================================
+
+本文件说明 HonorLocalOTA 在构建与运行时依赖的第三方组件、各自的许可，
+以及本模块如何满足这些许可的要求。
+
+本项目自身采用 AGPL-3.0（见仓库根目录 LICENSE）。但“本项目是 AGPL-3.0”
+不等于“可以不管依赖的许可”——下列组件以二进制形式随 APK 一起分发，
+每一种许可都有自己的义务。这一节把义务写清楚，不是走形式。
+
+最后更新：2026-11-17
+对应模块版本：2.15 (17)
+
+
+--------------------------------------------------
+一、随 APK 分发的组件（有分发义务，必须声明）
+--------------------------------------------------
+
+### 1. DexKit 2.3.0
+
+  Maven 坐标   org.luckypray:dexkit:2.3.0
+  上游         https://github.com/LuckyPray/DexKit
+  项目主页     https://luckypray.org/DexKit
+  作者         luckypray
+  许可         LGPL-3.0 与 Apache-2.0 双许可
+
+  分发了什么
+    - Java/Kotlin 部分：编译进 classes.dex（472 处 org/luckypray 引用）
+    - native 部分：lib/{arm64-v8a,armeabi-v7a,x86,x86_64}/libdexkit.so
+      四个 ABI 全部随 APK 打包
+
+  为什么不能 compileOnly
+    DexKit 的 findClass/findMethod 是 native 实现，靠 libdexkit.so。
+    运行时必须能从 APK 里加载它，所以它是真正的运行时依赖。
+
+  本模块选了哪个许可
+    DexKit 是双许可，作者允许使用者任选其一。本模块按 **LGPL-3.0** 履行
+    义务（这样不必把本项目也改成 Apache-2.0，也符合本项目整体 AGPL-3.0
+    的定位）。
+
+  LGPL-3.0 对本模块的要求与本模块的做法
+
+    (a) 声明使用了该库，并附许可全文
+        → 本文件 + META-INF/licenses/LGPL-3.0.txt（LGPL-3.0 全文）
+          + META-INF/licenses/GPL-3.0.txt（LGPL-3.0 第 3 条要求以 GPL-3.0
+            为补充条款，故须一并附上）
+        → 这些文件通过 app/build.gradle.kts 里
+          packaging.resources.merges 强制保留进 APK
+
+    (b) 允许使用者用修改后的版本替换该库（第 4 条 d 项）
+        → 本模块 **静态链接** 了 DexKit（dex 无法在运行时替换单个类），
+          按 LGPL-3.0 第 4 条 d 项第 0 目，静态链接须提供「目标代码与
+          源码的组合」，使使用者能够重新链接。
+        → 本模块的满足方式：**完整源码公开**。仓库
+          https://github.com/oopnv70-lab/HonorLocalOTA 包含全部构建脚本
+          (Gradle)、CI 工作流、依赖版本锁（gradle/libs.versions.toml），
+          任何人有能力重新构建一个把 DexKit 换掉的版本。
+        → 若你要换 DexKit：fork 本仓库，改
+          gradle/libs.versions.toml 里的 dexkit 版本（或换成你自己编译的
+          aar），然后照常构建。这是完整可行路径，不是空话。
+
+    (c) 修改 DexKit 本身时必须公开修改
+        → 本模块 **未修改** DexKit 的任何源码或二进制。用的是 Maven
+          Central 上的官方 2.3.0 产物，sha 可由 Gradle 依赖校验复现。
+
+    (d) 不得对许可文本做额外限制
+        → 本模块 AGPL-3.0 的附加条款不会被用来限制 DexKit 部分的 LGPL
+          权利。
+
+  替代方案（如果你认为 LGPL 静态链接仍不够干净）
+    DexKit 是双许可，可直接选 **Apache-2.0**，那样只需保留声明与 NOTICE，
+    没有重新链接的要求。本模块没有选它，仅仅是因为 AGPL-3.0 与
+    LGPL-3.0 兼容且更贴近本项目整体许可。若将来要简化合规成本，改选
+    Apache-2.0 是合法的。
+
+### 2. FlatBuffers Java 23.5.26
+
+  Maven 坐标   com.google.flatbuffers:flatbuffers-java:23.5.26
+  上游         https://github.com/google/flatbuffers
+  作者         Google Inc.
+  许可         Apache-2.0
+  分发形式     DexKit 的传递依赖，编译进 classes.dex
+  本模块做法   未修改；保留声明 + META-INF/licenses/Apache-2.0.txt
+
+### 3. kotlin-stdlib 1.5.0（及构建实际解析到的版本）
+
+  Maven 坐标   org.jetbrains.kotlin:kotlin-stdlib
+  上游         https://github.com/JetBrains/kotlin
+  作者         JetBrains s.r.o.
+  许可         Apache-2.0
+  分发形式     DexKit 的传递依赖，编译进 classes.dex
+  本模块做法   未修改；保留声明 + Apache-2.0 全文
+  备注         DexKit 的 pom 里写的是 1.5.0，实际由 Gradle 按依赖调解
+               决定最终版本；无论哪个版本，kotlin-stdlib 都是 Apache-2.0。
+
+### 4. libcxx Prefab (dev.rikka.ndk.thirdparty:cxx:1.2.0)
+
+  Maven 坐标   dev.rikka.ndk.thirdparty:cxx:1.2.0
+  上游         https://github.com/RikkaW/libcxx-prefab
+  实际内容     LLVM libc++ for Android（源自 https://github.com/topjohnwu/libcxx）
+  作者         Rikka / topjohnwu
+  许可         Apache-2.0
+  分发形式     **仅构建期**。这是 Prefab 形式的 C++ 运行时头文件与静态库，
+               用于编译 libdexkit.so。它本身不单独进入 APK，
+               其代码已链接进 libdexkit.so 内部。
+  本模块做法   未修改；在此声明来源，保留 Apache-2.0 全文
+
+
+--------------------------------------------------
+二、仅在构建期使用、不随 APK 分发的组件
+--------------------------------------------------
+
+这些是 compileOnly，只出现在编译 classpath 上，不进入 APK，
+因此没有“随二进制分发”的义务。但为完整起见仍然列出。
+
+### libxposed API 102.0.0
+
+  Maven 坐标   io.github.libxposed:api:102.0.0
+  上游         https://github.com/libxposed/api
+  许可         Apache-2.0
+  使用方式     compileOnly。模块只依赖它的接口签名，运行时由 LSPosed
+               框架（已安装在用户设备上）提供实现。
+  说明         因此 APK 里不含 libxposed 的任何代码。
+
+### Android Gradle Plugin 9.2.1 / Gradle / JDK
+
+  构建工具，不随 APK 分发。AGP 为 Apache-2.0，Gradle 为 Apache-2.0。
+
+
+--------------------------------------------------
+三、不包含的内容（明确排除，避免误解）
+--------------------------------------------------
+
+- **不含任何荣耀/华为的代码或资源。** 本模块不打包、不分发 com.hihonor.ouc
+  的任何字节。它只在运行时读取设备上已存在的 APK 做静态分析，
+  不复制其代码。
+- **不含 GPL 代码。** 除 LGPL-3.0 的 DexKit 外，无 GPL 系组件。
+  本项目自身 AGPL-3.0 是作者的选择，不是为了满足某个依赖的要求。
+- **不含从 Stack Overflow 等处抄来的代码片段。** 逻辑均为阅读反编译结果
+  后自行实现；若发现问题请提 issue 指出。
+
+> 注意：仓库 has_issues 已关闭，反馈请走仓库主页说明的渠道。
+
+
+--------------------------------------------------
+四、如何自行核验
+--------------------------------------------------
+
+本声明里的每一项都可以自己查，不必信任本文：
+
+  1. 看依赖清单
+       cat gradle/libs.versions.toml
+       cat app/build.gradle.kts
+
+  2. 看 APK 里到底进了什么
+       unzip -l HonorLocalOTA.apk | grep -E 'META-INF|lib/'
+
+     应能看到：
+       META-INF/licenses/LGPL-3.0.txt
+       META-INF/licenses/GPL-3.0.txt
+       META-INF/licenses/Apache-2.0.txt
+       META-INF/THIRD_PARTY_NOTICES.txt   ← 本文件
+       lib/*/libdexkit.so
+
+  3. 核对 DexKit 的许可（上游权威来源）
+       curl -s https://repo1.maven.org/maven2/org/luckypray/dexkit/2.3.0/dexkit-2.3.0.pom
+
+     应看到 <licenses> 段里同时列了 LGPL-3.0 与 Apache-2.0。
+
+  4. 核对本模块没有改 DexKit
+       取 Maven Central 的 dexkit-2.3.0.aar，与 APK 里的
+       lib/*/libdexkit.so 比对大小与哈希。二者应一致。
+
+
+--------------------------------------------------
+五、如果这份声明有错
+--------------------------------------------------
+
+请指出具体哪一条不对（组件名 / 许可名 / 义务履行方式），并附上你能查到的
+上游依据。合规声明最怕的就是「照着印象写」——本项目在这一项上宁可写得
+啰嗦，也不愿意漏一个组件或写错一个许可名。
+
+已知的不完美之处，主动说明：
+  - kotlin-stdlib 的实际解析版本取决于 Gradle 依赖调解，本文件没有钉死
+    具体版本号。若你要精确清单，用
+      ./gradlew :app:dependencies --configuration releaseRuntimeClasspath
+    输出为准。

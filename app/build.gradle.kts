@@ -26,8 +26,8 @@ android {
         applicationId = "io.github.oopnv70_lab.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 17
-        versionName = "2.15"
+        versionCode = 18
+        versionName = "2.16"
     }
 
     signingConfigs {
@@ -64,11 +64,21 @@ android {
         resources {
             // merges 优先级高于 excludes：这里的模式会被强制保留进 APK。
             // xposed 三件套（module.prop / java_init.list / scope.list）必须进 APK，
-            // 否则 LSPosed 无法识别本模块；AGPL-3.0 要求随二进制附完整许可文本。
+            // 否则 LSPosed 无法识别本模块。
+            //
+            // 许可相关的三条是法定义务，不是可选装饰：
+            //   META-INF/LICENSE                 本项目 AGPL-3.0 全文
+            //   META-INF/THIRD_PARTY_NOTICES.txt  第三方组件声明（本仓库根同名文件）
+            //   META-INF/licenses/*               LGPL-3.0 / GPL-3.0 / Apache-2.0 全文
+            // 少一个就算许可证不合规——DexKit 是 LGPL-3.0（与 Apache-2.0 双许可），
+            // LGPL-3.0 第 4 条要求随分发附上许可文本，且第 3 条要求以 GPL-3.0
+            // 为补充条款，所以 GPL-3.0 也必须一起附。详见 THIRD_PARTY_NOTICES.txt。
             merges += listOf(
                 "META-INF/xposed/*",
                 "META-INF/LICENSE",
-                "META-INF/NOTICE"
+                "META-INF/NOTICE",
+                "META-INF/THIRD_PARTY_NOTICES.txt",
+                "META-INF/licenses/*"
             )
             excludes += "**"
         }
