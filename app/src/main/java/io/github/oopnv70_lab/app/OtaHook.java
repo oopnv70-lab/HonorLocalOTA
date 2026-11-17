@@ -131,7 +131,7 @@ public class OtaHook extends XposedModule {
         ClassLoader cl = param.getClassLoader();
         log(Log.INFO, TAG, "onPackageReady: " + param.getPackageName());
 
-        // ── 动态定位六个目标 ──
+        // ── 动态定位五个目标 ──
         // 这一步替代了原先写死在常量里的六个混淆名。
         // 解析器内部按「缓存 → DexKit → 硬编码 → 失败」四级取，
         // 每个目标独立，任何一个失败都不影响其余。
@@ -158,7 +158,7 @@ ResolvedTargets rt = resolveTargets(cl, param);
     }
 
     /**
-     * 解析六个目标的真实类名/方法名。
+     * 解析五个目标的真实类名/方法名。
      *
      * ── 为什么整块包在 try 里 ──
      *   定位是「尽力而为」：libdexkit.so 加载失败、宿主 APK 读不到、
@@ -267,7 +267,7 @@ ResolvedTargets rt = resolveTargets(cl, param);
     }
 
     /**
-     * 六个目标的解析结果集合。
+     * 五个目标的解析结果集合。
      *
      * 为什么单独包一层：hook 方法需要「拿到某个目标，拿不到就用硬编码」，
      * 这个动作在六处都要重复。封装成 get(id, fallbackClass, fallbackMethod) 之后，

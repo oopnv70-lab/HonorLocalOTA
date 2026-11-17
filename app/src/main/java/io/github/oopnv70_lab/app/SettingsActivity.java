@@ -80,32 +80,28 @@ public class SettingsActivity extends Activity {
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        int pad = Theme.dp(this, 20);
-        page.setPadding(pad, Theme.dp(this, 28), pad, Theme.dp(this, 28));
+        int pad = Theme.dp(this, 16);
+        page.setPadding(pad, Theme.dp(this, 20), pad, Theme.dp(this, 20));
         page.setBackgroundColor(theme.background);
 
         // ── 页头 ──
         TextView title = theme.title(this, "软件更新增强");
         page.addView(title, theme.matchWrap());
 
-        TextView sub = theme.text(this, "荣耀「软件更新」增强模块", 14, theme.onSurfaceVariant);
-        sub.setPadding(0, Theme.dp(this, 6), 0, 0);
-        page.addView(sub, theme.matchWrap());
-
         // ── 卡片一：屏蔽系统更新 ──
-        page.addView(buildBlockCard(), theme.gaps(this, 24, 0));
+        page.addView(buildBlockCard(), theme.gaps(this, 16, 0));
 
         // ── 卡片二：强制全量包 ──
-        page.addView(buildFullCard(), theme.gaps(this, 14, 0));
+        page.addView(buildFullCard(), theme.gaps(this, 10, 0));
 
         // ── 卡片三：目标定位 ──
-        page.addView(buildProbeCard(), theme.gaps(this, 14, 0));
+        page.addView(buildProbeCard(), theme.gaps(this, 10, 0));
 
         // ── 卡片四：重启「软件更新」 ──
-        page.addView(buildRestartCard(), theme.gaps(this, 14, 0));
+        page.addView(buildRestartCard(), theme.gaps(this, 10, 0));
 
         // ── 卡片五：状态 ──
-        page.addView(buildStatusCard(), theme.gaps(this, 14, 0));
+        page.addView(buildStatusCard(), theme.gaps(this, 10, 0));
 
         ScrollView sv = new ScrollView(this);
         sv.addView(page, new ScrollView.LayoutParams(
@@ -144,14 +140,7 @@ public class SettingsActivity extends Activity {
         blockSwitch = new SwitchButton(this);
 
         LinearLayout row = switchRow("屏蔽系统更新", blockHint, blockSwitch);
-        card.addView(row, theme.gaps(this, 14, 0));
-
-        TextView desc = theme.text(this,
-                "开启后，「软件更新」里的检查更新会一直显示「已是最新版本」，"
-                        + "不会再弹新版本提示。改完立刻生效，不用重启「软件更新」。",
-                13, theme.onSurfaceVariant);
-        desc.setLineSpacing(Theme.dp(this, 3), 1f);
-        card.addView(desc, theme.gaps(this, 14, 0));
+        card.addView(row, theme.gaps(this, 12, 0));
 
         // 让整张卡片都能点（点文字也能切）
         card.setOnClickListener(v -> blockSwitch.performClick());
@@ -177,21 +166,11 @@ public class SettingsActivity extends Activity {
         fullSwitch = new SwitchButton(this);
 
         LinearLayout row = switchRow("强制全量包", fullHint, fullSwitch);
-        card.addView(row, theme.gaps(this, 14, 0));
-
-        TextView desc = theme.text(this,
-                "开启后，检查更新会直接向服务器要完整包，而不是增量包。"
-                        + "这替代了「反复清除应用数据碰运气」的土办法：它是确定性的，"
-                        + "清数据只是恰好改变了全量/增量的判定条件。",
-                13, theme.onSurfaceVariant);
-        desc.setLineSpacing(Theme.dp(this, 3), 1f);
-        card.addView(desc, theme.gaps(this, 14, 0));
+        card.addView(row, theme.gaps(this, 12, 0));
 
         TextView note = theme.text(this,
-                "注意：此开关只决定服务器回哪种包，不保证一定能装。"
-                        + "目标版本高于当前版本可以正常安装；降级仍会被系统安装引擎拒绝。",
-                12, theme.onSurfaceVariant);
-        note.setLineSpacing(Theme.dp(this, 3), 1f);
+                "只决定服务器回哪种包，降级仍会被系统拒绝。",
+                11, theme.onSurfaceVariant);
         card.addView(note, theme.gaps(this, 10, 0));
 
         card.setOnClickListener(v -> fullSwitch.performClick());
@@ -222,12 +201,12 @@ public class SettingsActivity extends Activity {
         LinearLayout textCol = new LinearLayout(this);
         textCol.setOrientation(LinearLayout.VERTICAL);
 
-        TextView t = theme.text(this, name, 17, theme.onSurface);
+        TextView t = theme.text(this, name, 16, theme.onSurface);
         t.setTypeface(android.graphics.Typeface.create(
                 "sans-serif-medium", android.graphics.Typeface.NORMAL));
         textCol.addView(t, theme.matchWrap());
 
-        hint.setPadding(0, Theme.dp(this, 4), 0, 0);
+        hint.setPadding(0, Theme.dp(this, 3), 0, 0);
         textCol.addView(hint, theme.matchWrap());
 
         LinearLayout.LayoutParams colLp = new LinearLayout.LayoutParams(
@@ -248,7 +227,7 @@ public class SettingsActivity extends Activity {
      * ── 为什么用户需要看见这个 ──
      *   模块能不能用，取决于「目标定没定到」。以前这件事只在
      *   logcat 里，用户装完模块、点不动、看不出任何原因，只能来问。
-     *   现在点一下就把六个目标的定位结论摆在眼前：
+     *   现在点一下就把五个目标的定位结论摆在眼前：
      *     · 定到了 → 显示 类名#方法名 [来源]
      *     · 没定到 → 显示「未定位」，并且能看出是哪一类目标失败
      *
@@ -262,42 +241,24 @@ public class SettingsActivity extends Activity {
 
         card.addView(theme.sectionTitle(this, "目标定位"), theme.matchWrap());
 
-        TextView desc = theme.text(this,
-                "点一下，本模块会用 root 把「软件更新」启动一次，让它在自己的进程里按语义特征把类名、方法名查出来。",
-                13, theme.onSurfaceVariant);
-        desc.setLineSpacing(Theme.dp(this, 3), 1f);
-        card.addView(desc, theme.gaps(this, 12, 0));
-
-        TextView why = theme.text(this,
-                "这是整个模块兼容性的基础：荣耀改版会重新混淆类名，"
-                        + "写死的名字立刻失效，而按语义特征查依然能找到。"
-                        + "换版本或换设备后点一次，就知道还能不能用。"
-                        + "\n\n"
-                        + "为什么要启动「软件更新」：只有在它的进程里，"
-                        + "它自己的安装包路径和类加载器才是可直接获取的，"
-                        + "而且能用真实类加载器复核结果。启动一次的代价就是这个。",
-                12, theme.onSurfaceVariant);
-        why.setLineSpacing(Theme.dp(this, 3), 1f);
-        card.addView(why, theme.gaps(this, 8, 0));
-
-        probeBtn = theme.text(this, "解析目标", 16, theme.onPrimary);
+        probeBtn = theme.text(this, "解析目标", 15, theme.onPrimary);
         probeBtn.setGravity(Gravity.CENTER);
         probeBtn.setTypeface(android.graphics.Typeface.create(
                 "sans-serif-medium", android.graphics.Typeface.NORMAL));
-        probeBtn.setPadding(0, Theme.dp(this, 12), 0, Theme.dp(this, 12));
+        probeBtn.setPadding(0, Theme.dp(this, 10), 0, Theme.dp(this, 10));
         probeBtn.setBackground(theme.rounded(this, theme.primary, 999));
         probeBtn.setClickable(true);
-        card.addView(probeBtn, theme.gaps(this, 16, 0));
+        card.addView(probeBtn, theme.gaps(this, 12, 0));
 
         probeSummary = theme.text(this, "尚未解析", 12, theme.onSurfaceVariant);
-        probeSummary.setPadding(0, Theme.dp(this, 10), 0, 0);
+        probeSummary.setPadding(0, Theme.dp(this, 8), 0, 0);
         card.addView(probeSummary, theme.matchWrap());
 
         probeResult = theme.text(this, "", 12, theme.onSurface);
         probeResult.setTypeface(android.graphics.Typeface.MONOSPACE);
-        probeResult.setLineSpacing(Theme.dp(this, 5), 1f);
+        probeResult.setLineSpacing(Theme.dp(this, 3), 1f);
         probeResult.setTextIsSelectable(true);
-        probeResult.setPadding(0, Theme.dp(this, 12), 0, 0);
+        probeResult.setPadding(0, Theme.dp(this, 8), 0, 0);
         card.addView(probeResult, theme.matchWrap());
 
         probeBtn.setOnClickListener(v -> doProbe());
@@ -423,31 +384,23 @@ public class SettingsActivity extends Activity {
         LinearLayout card = theme.card(this);
         card.addView(theme.sectionTitle(this, "重启软件更新"), theme.matchWrap());
 
-        TextView desc = theme.text(this,
-                "以 root 停掉「软件更新」进程再重新打开。",
-                13, theme.onSurfaceVariant);
-        desc.setLineSpacing(Theme.dp(this, 3), 1f);
-        card.addView(desc, theme.gaps(this, 12, 0));
-
         TextView when = theme.text(this,
-                "什么时候用：刚在 LSPosed 里启用或更新了本模块；"
-                        + "或者「软件更新」的界面卡住了。"
-                        + "两个开关是即时生效的，改开关不需要点这里。",
-                12, theme.onSurfaceVariant);
+                "刚在 LSPosed 里启用或更新本模块，或界面卡住时用。开关即时生效，不需要重启。",
+                11, theme.onSurfaceVariant);
         when.setLineSpacing(Theme.dp(this, 3), 1f);
         card.addView(when, theme.gaps(this, 8, 0));
 
-        restartBtn = theme.text(this, "重启「软件更新」", 16, theme.onPrimary);
+        restartBtn = theme.text(this, "重启「软件更新」", 15, theme.onPrimary);
         restartBtn.setGravity(Gravity.CENTER);
         restartBtn.setTypeface(android.graphics.Typeface.create(
                 "sans-serif-medium", android.graphics.Typeface.NORMAL));
-        restartBtn.setPadding(0, Theme.dp(this, 12), 0, Theme.dp(this, 12));
+        restartBtn.setPadding(0, Theme.dp(this, 10), 0, Theme.dp(this, 10));
         restartBtn.setBackground(theme.rounded(this, theme.primary, 999));
         restartBtn.setClickable(true);
-        card.addView(restartBtn, theme.gaps(this, 16, 0));
+        card.addView(restartBtn, theme.gaps(this, 12, 0));
 
         restartHint = theme.text(this, "", 12, theme.onSurfaceVariant);
-        restartHint.setPadding(0, Theme.dp(this, 10), 0, 0);
+        restartHint.setPadding(0, Theme.dp(this, 8), 0, 0);
         card.addView(restartHint, theme.matchWrap());
 
         restartBtn.setOnClickListener(v -> doRestart());
@@ -499,11 +452,11 @@ public class SettingsActivity extends Activity {
 
         card.addView(theme.sectionTitle(this, "状态"), theme.matchWrap());
 
-        statusLine = theme.text(this, "读取中…", 13, theme.onSurfaceVariant);
+        statusLine = theme.text(this, "读取中…", 12, theme.onSurfaceVariant);
         statusLine.setTypeface(android.graphics.Typeface.MONOSPACE);
-        statusLine.setLineSpacing(Theme.dp(this, 4), 1f);
+        statusLine.setLineSpacing(Theme.dp(this, 3), 1f);
         statusLine.setTextIsSelectable(true);
-        card.addView(statusLine, theme.gaps(this, 12, 0));
+        card.addView(statusLine, theme.gaps(this, 8, 0));
 
         return card;
     }

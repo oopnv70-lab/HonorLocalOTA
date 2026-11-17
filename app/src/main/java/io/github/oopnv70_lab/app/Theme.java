@@ -20,9 +20,9 @@ import android.widget.TextView;
  *
  * ── 视觉上怎么做到「现代」──
  *   跟 Material You 对齐的是这几个可量化的点，而不是某个具体库：
- *   · 大圆角（卡片 24dp、按钮/开关 999dp 胶囊）
- *   · 卡片式分区 + 12dp 以上的卡片间距
- *   · 标题 24sp/半粗、正文 14sp、辅助文字 12sp 三级字号
+ *   · 中圆角（卡片 20dp、按钮/开关 999dp 胶囊）
+ *   · 卡片式分区 + 10dp 卡片间距、卡内 16/14dp 内边距
+ *   · 标题 21sp/半粗、开关标题 16sp、辅助文字 11~12sp
  *   · 主色 + onSurfaceVariant 两级文字色，避免纯黑纯白
  *   · 深色模式跟随系统（values-night 换主题与底色）
  */
@@ -113,7 +113,7 @@ final class Theme {
 
     /** 一级标题。 */
     TextView title(Context c, String s) {
-        TextView t = text(c, s, 24, onSurface);
+        TextView t = text(c, s, 21, onSurface);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setLetterSpacing(-0.01f);
         return t;
@@ -121,7 +121,7 @@ final class Theme {
 
     /** 卡片内小标题。 */
     TextView sectionTitle(Context c, String s) {
-        TextView t = text(c, s, 13, onSurfaceVariant);
+        TextView t = text(c, s, 12, onSurfaceVariant);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setLetterSpacing(0.06f);
         t.setAllCaps(true);
@@ -132,8 +132,8 @@ final class Theme {
     LinearLayout card(Context c) {
         LinearLayout l = new LinearLayout(c);
         l.setOrientation(LinearLayout.VERTICAL);
-        l.setBackground(rounded(c, surface, 24));
-        l.setPadding(dp(c, 20), dp(c, 18), dp(c, 20), dp(c, 18));
+        l.setBackground(rounded(c, surface, 20));
+        l.setPadding(dp(c, 16), dp(c, 14), dp(c, 16), dp(c, 14));
         return l;
     }
 
